@@ -1,0 +1,7 @@
+.git
+.github
+oracle/out
+coverage
+dist
+*.wav
+*.webm

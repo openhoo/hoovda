@@ -1,0 +1,14 @@
+{
+  "$schema": "../schemas/manifest.schema.json",
+  "schemaVersion": 1,
+  "profile": "nvda-web-2026.1.1",
+  "status": "incomplete",
+  "oracle": {
+    "product": "NVDA",
+    "version": "2026.1.1",
+    "platform": "independently supplied external black-box reference",
+    "captureToolHash": ""
+  },
+  "cases": [],
+  "notes": "Release gate intentionally closed until independently supplied NVDA oracle traces and HooVDA observed traces cover every required tag and both locale-layout matrices, then match exactly."
+}

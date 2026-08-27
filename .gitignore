@@ -1,0 +1,10 @@
+/bin/
+/dist/
+/coverage/
+/oracle/out/
+*.test
+*.prof
+*.wav
+*.webm
+.idea/
+.vscode/
