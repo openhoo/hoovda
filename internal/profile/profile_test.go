@@ -45,6 +45,41 @@ func TestTablePresentationIncludesDimensions(t *testing.T) {
 	}
 }
 
+func TestTableCellPresentationIncludesHeadersAndSpans(t *testing.T) {
+	presenter, _ := NewPresenter("en-US")
+	got := presenter.Present(&model.Node{
+		Role:             "table cell",
+		Name:             "42",
+		ColumnHeaderText: []string{"Year"},
+		RowHeaderText:    []string{"Revenue"},
+		Row:              2,
+		Column:           2,
+		ColumnSpan:       2,
+		States:           map[string]bool{"enabled": true},
+	}, "tableNavigation")
+	if got.Speech != "Year Revenue 42 cell row 2 column 2 spans 2 columns" {
+		t.Fatalf("speech = %q", got.Speech)
+	}
+}
+
+func TestPresentationIncludesDescriptionAndRelevantRelationsOnce(t *testing.T) {
+	presenter, _ := NewPresenter("en-US")
+	got := presenter.Present(&model.Node{
+		Role:        "entry",
+		Name:        "Email",
+		Description: "Work address",
+		States:      map[string]bool{"enabled": true, "invalid": true},
+		RelationText: map[string][]string{
+			"described by":  {"Work address"},
+			"details":       {"Privacy details"},
+			"error message": {"Enter a valid email"},
+		},
+	}, "focus")
+	if got.Speech != "Email Work address entry invalid entry Privacy details Enter a valid email" {
+		t.Fatalf("speech = %q", got.Speech)
+	}
+}
+
 func TestGestureNormalization(t *testing.T) {
 	if got := NormalizeGesture("Shift+Control+H"); got != "ctrl+shift+h" {
 		t.Fatalf("gesture = %q", got)

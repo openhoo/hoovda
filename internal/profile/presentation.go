@@ -32,8 +32,15 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 		return Presentation{}
 	}
 	parts := make([]string, 0, 12)
+	if reason == "tableNavigation" {
+		parts = appendDistinct(parts, node.ColumnHeaderText...)
+		parts = appendDistinct(parts, node.RowHeaderText...)
+	}
 	if content := strings.TrimSpace(node.SpokenContent()); content != "" {
-		parts = append(parts, content)
+		parts = appendDistinct(parts, content)
+	}
+	if description := strings.TrimSpace(node.Description); description != "" && description != strings.TrimSpace(node.SpokenContent()) {
+		parts = appendDistinct(parts, description)
 	}
 	role := p.role(node.Role)
 	if strings.EqualFold(node.Role, "landmark") {
@@ -68,11 +75,32 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 			parts = append(parts, fmt.Sprintf("row %d column %d", node.Row, node.Column))
 		}
 	}
+	if node.RowSpan > 1 {
+		if p.locale == "de-DE" {
+			parts = append(parts, fmt.Sprintf("über %d Zeilen", node.RowSpan))
+		} else {
+			parts = append(parts, fmt.Sprintf("spans %d rows", node.RowSpan))
+		}
+	}
+	if node.ColumnSpan > 1 {
+		if p.locale == "de-DE" {
+			parts = append(parts, fmt.Sprintf("über %d Spalten", node.ColumnSpan))
+		} else {
+			parts = append(parts, fmt.Sprintf("spans %d columns", node.ColumnSpan))
+		}
+	}
 	if node.Role == "table" && node.RowCount > 0 && node.ColumnCount > 0 {
 		if p.locale == "de-DE" {
 			parts = append(parts, fmt.Sprintf("%d Zeilen %d Spalten", node.RowCount, node.ColumnCount))
 		} else {
 			parts = append(parts, fmt.Sprintf("%d rows %d columns", node.RowCount, node.ColumnCount))
+		}
+	}
+	if shouldPresentRelations(reason) {
+		parts = appendDistinct(parts, node.RelationText["described by"]...)
+		parts = appendDistinct(parts, node.RelationText["details"]...)
+		if node.HasState("invalid") {
+			parts = appendDistinct(parts, node.RelationText["error message"]...)
 		}
 	}
 	text := strings.Join(nonEmpty(parts), " ")
@@ -81,6 +109,52 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 		commands = append(commands, events.SpeechCommand{Kind: "language", Value: node.Locale})
 	}
 	return Presentation{Speech: text, SpeechCommands: commands, Braille: text}
+}
+
+func shouldPresentRelations(reason string) bool {
+	switch reason {
+	case "focus", "quickNavigation", "tableNavigation", "report":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Presenter) PresentText(node *model.Node, text string, unit model.TextUnit) Presentation {
+	speech := strings.TrimSpace(text)
+	if speech == "" {
+		if p.locale == "de-DE" {
+			speech = "leer"
+		} else {
+			speech = "blank"
+		}
+	} else if unit == model.TextUnitCharacter {
+		switch text {
+		case " ":
+			if p.locale == "de-DE" {
+				speech = "Leerzeichen"
+			} else {
+				speech = "space"
+			}
+		case "\t":
+			if p.locale == "de-DE" {
+				speech = "Tabulator"
+			} else {
+				speech = "tab"
+			}
+		case "\r", "\n":
+			if p.locale == "de-DE" {
+				speech = "neue Zeile"
+			} else {
+				speech = "new line"
+			}
+		}
+	}
+	commands := []events.SpeechCommand{{Kind: "reason", Value: "textNavigation"}}
+	if node != nil && node.Locale != "" {
+		commands = append(commands, events.SpeechCommand{Kind: "language", Value: node.Locale})
+	}
+	return Presentation{Speech: speech, SpeechCommands: commands, Braille: text}
 }
 
 func (p *Presenter) landmark(role string) string {
@@ -230,6 +304,16 @@ func sameNormalized(values []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func appendDistinct(values []string, additions ...string) []string {
+	for _, value := range additions {
+		value = strings.TrimSpace(value)
+		if value != "" && !sameNormalized(values, value) {
+			values = append(values, value)
+		}
+	}
+	return values
 }
 
 func ProfileDigestInput(locale string) []string {

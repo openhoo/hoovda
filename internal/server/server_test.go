@@ -26,7 +26,9 @@ type fakeAccess struct {
 	events chan engine.NativeEvent
 }
 
-func (f *fakeAccess) BrowserGraph(context.Context, string) (*model.Graph, error) { return f.graph, nil }
+func (f *fakeAccess) BrowserGraph(context.Context, string, model.ObjectID) (*model.Graph, error) {
+	return f.graph, nil
+}
 func (f *fakeAccess) ReadNode(_ context.Context, id model.ObjectID) (*model.Node, error) {
 	return f.graph.Nodes[id], nil
 }

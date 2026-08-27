@@ -62,6 +62,25 @@ func TestShiftedNumberNormalizesToGestureKey(t *testing.T) {
 	}
 }
 
+func TestPageKeysNormalizeFromX11NamesAndHardwareCodes(t *testing.T) {
+	cases := []struct {
+		event DeviceEvent
+		want  string
+	}{
+		{event: DeviceEvent{EventString: "Prior"}, want: "pageup"},
+		{event: DeviceEvent{EventString: "Next"}, want: "pagedown"},
+		{event: DeviceEvent{EventString: "Page_Up"}, want: "pageup"},
+		{event: DeviceEvent{EventString: "Page_Down"}, want: "pagedown"},
+		{event: DeviceEvent{HWCode: 112}, want: "pageup"},
+		{event: DeviceEvent{HWCode: 117}, want: "pagedown"},
+	}
+	for _, item := range cases {
+		if got := normalizeEventKey(item.event); got != item.want {
+			t.Fatalf("normalizeEventKey(%#v) = %q, want %q", item.event, got, item.want)
+		}
+	}
+}
+
 func hasGrab(grabs []listenerGrab, mask uint32, keysym int32) bool {
 	for _, grab := range grabs {
 		if grab.Mask != mask {

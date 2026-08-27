@@ -79,6 +79,11 @@ type TableCellPosition struct {
 	Column int32
 }
 
+type Relation struct {
+	Type    uint32
+	Targets []ObjectReference
+}
+
 // ActionDescription mirrors one (sss) member of Action.GetActions.
 type ActionDescription struct {
 	LocalizedName string
@@ -127,6 +132,21 @@ var stateNames = []string{
 	"vertical", "visible", "manages descendants", "indeterminate", "required", "truncated",
 	"animated", "invalid", "supports autocompletion", "selectable text", "is default", "visited",
 	"checkable", "has popup", "read only",
+}
+
+var relationNames = []string{
+	"null", "label for", "labelled by", "controller for", "controlled by",
+	"member of", "tooltip for", "node child of", "node parent of", "extended",
+	"flows to", "flows from", "subwindow of", "embeds", "embedded by",
+	"popup for", "parent window of", "description for", "described by", "details",
+	"details for", "error message", "error for",
+}
+
+func relationName(value uint32) string {
+	if int(value) >= len(relationNames) {
+		return fmt.Sprintf("relation-%d", value)
+	}
+	return relationNames[value]
 }
 
 func DBusError(err error) *dbus.Error {

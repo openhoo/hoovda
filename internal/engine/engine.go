@@ -17,7 +17,7 @@ import (
 )
 
 type Accessibility interface {
-	BrowserGraph(context.Context, string) (*model.Graph, error)
+	BrowserGraph(context.Context, string, model.ObjectID) (*model.Graph, error)
 	ReadNode(context.Context, model.ObjectID) (*model.Node, error)
 	DoDefaultAction(context.Context, model.ObjectID) error
 	Events() <-chan NativeEvent
@@ -37,12 +37,11 @@ type AudioSink interface {
 }
 
 type Config struct {
-	Locale          string
-	KeyboardLayout  string
-	BrowserProcess  string
-	StartupTimeout  time.Duration
-	RefreshDebounce time.Duration
-	SynthRequest    synth.Request
+	Locale         string
+	KeyboardLayout string
+	BrowserProcess string
+	StartupTimeout time.Duration
+	SynthRequest   synth.Request
 }
 
 type State struct {
@@ -82,9 +81,6 @@ type Engine struct {
 }
 
 func New(access Accessibility, store *events.Store, presenter *profile.Presenter, brailleTranslator braille.Translator, synthDriver synth.Driver, sink AudioSink, logger *slog.Logger, cfg Config) *Engine {
-	if cfg.RefreshDebounce == 0 {
-		cfg.RefreshDebounce = 50 * time.Millisecond
-	}
 	if cfg.SynthRequest.Rate == 0 {
 		cfg.SynthRequest.Rate = 175
 	}
@@ -114,14 +110,24 @@ func (e *Engine) Start(ctx context.Context) error {
 func (e *Engine) Refresh(ctx context.Context) error {
 	e.refreshMu.Lock()
 	defer e.refreshMu.Unlock()
-	graph, err := e.access.BrowserGraph(ctx, e.cfg.BrowserProcess)
+	e.mu.RLock()
+	preferred := model.ObjectID{}
+	focusAtStart := e.focus
+	if e.webContentFocused {
+		preferred = focusAtStart
+		if document, ok := e.graph.DocumentRoot(focusAtStart); ok {
+			preferred = document
+		}
+	}
+	e.mu.RUnlock()
+	graph, err := e.access.BrowserGraph(ctx, e.cfg.BrowserProcess, preferred)
 	if err != nil {
 		return err
 	}
 	e.mu.Lock()
 	oldGraph := e.graph
 	e.graph = graph
-	e.graphDirty = false
+	e.graphDirty = e.webContentFocused && e.focus != focusAtStart
 	if _, ok := graph.Node(e.cursor.Object); !ok {
 		e.cursor.Object = remapCursor(oldGraph, graph, e.cursor.Object)
 		e.cursor.Offset = 0
@@ -274,6 +280,13 @@ func (e *Engine) DocumentSnapshot() []model.Node {
 	return e.graph.Snapshot()
 }
 
+// Sync rebuilds the accessibility graph only when an AT-SPI structural event
+// invalidated it. Artifact and document exports use this so they never freeze a
+// pre-mutation graph merely because no navigation command followed the change.
+func (e *Engine) Sync(ctx context.Context) error {
+	return e.refreshIfDirty(ctx)
+}
+
 func (e *Engine) HandleGesture(ctx context.Context, gesture string) (bool, error) {
 	command, ok := profile.CommandByGesture(gesture, e.cfg.KeyboardLayout)
 	if !ok {
@@ -397,6 +410,9 @@ func (e *Engine) moveText(command profile.Command) error {
 			e.cursor.Offset = 0
 			node = graph.Nodes[document]
 		}
+		e.mu.Unlock()
+		e.emit(e.presenter.Present(node, "textNavigation"), node, command.ID, "textNavigation", "normal")
+		return nil
 	} else if command.ID == "documentEnd" {
 		if document, ok := graph.DocumentRoot(e.cursor.Object); ok {
 			for index := len(graph.Order) - 1; index >= 0; index-- {
@@ -406,17 +422,108 @@ func (e *Engine) moveText(command profile.Command) error {
 					break
 				}
 			}
-			e.cursor.Offset = len([]rune(node.SpokenContent()))
+			e.cursor.Offset = len([]rune(navigableText(node)))
 		}
-	} else {
-		next, ok := graph.MoveInDocument(e.cursor.Object, command.Direction, nil)
+		e.mu.Unlock()
+		e.emit(e.presenter.Present(node, "textNavigation"), node, command.ID, "textNavigation", "normal")
+		return nil
+	} else if command.ID == "nextParagraphText" || command.ID == "previousParagraphText" {
+		next, ok := graph.MoveInDocument(e.cursor.Object, command.Direction, profile.MatchTarget("textParagraph"))
 		if ok {
 			e.cursor.Object, e.cursor.Offset, node = next.ID, 0, next
 		}
+		e.mu.Unlock()
+		if !ok {
+			e.emit(e.presenter.NoTarget("text paragraph", command.Direction), nil, command.ID, "navigationBoundary", "normal")
+			return nil
+		}
+		e.emit(e.presenter.Present(node, "textNavigation"), node, command.ID, "textNavigation", "normal")
+		return nil
+	}
+	unit, ok := textUnit(command.ID)
+	if !ok {
+		e.mu.Unlock()
+		return fmt.Errorf("unsupported text command %q", command.ID)
+	}
+	text := navigableText(node)
+	rangeValue, found, err := model.MoveTextUnit(node.ID, text, e.cursor.Offset, command.Direction, unit)
+	if err != nil {
+		e.mu.Unlock()
+		return err
+	}
+	if !found {
+		node, text, rangeValue, found = adjacentTextUnit(graph, e.cursor.Object, command.Direction, unit)
+	}
+	if found {
+		e.cursor.Object, e.cursor.Offset = node.ID, rangeValue.Start
 	}
 	e.mu.Unlock()
-	e.emit(e.presenter.Present(node, "textNavigation"), node, command.ID, "textNavigation", "normal")
+	if !found {
+		e.emit(e.presenter.NoTarget(string(unit), command.Direction), nil, command.ID, "navigationBoundary", "normal")
+		return nil
+	}
+	fragment, err := rangeValue.Text(text)
+	if err != nil {
+		return err
+	}
+	e.emit(e.presenter.PresentText(node, fragment, unit), node, command.ID, "textNavigation", "normal")
 	return nil
+}
+
+func textUnit(commandID string) (model.TextUnit, bool) {
+	switch commandID {
+	case "nextCharacter", "previousCharacter":
+		return model.TextUnitCharacter, true
+	case "nextWord", "previousWord":
+		return model.TextUnitWord, true
+	case "nextLine", "previousLine":
+		return model.TextUnitLine, true
+	default:
+		return "", false
+	}
+}
+
+func navigableText(node *model.Node) string {
+	if node == nil {
+		return ""
+	}
+	if node.Text != "" {
+		// Chromium exposes embedded descendants in AT-SPI Text as U+FFFC.
+		// HooVDA navigates those descendants as graph nodes, so the marker must
+		// never become literal speech or braille.
+		return strings.ReplaceAll(node.Text, "\ufffc", "")
+	}
+	if len(node.Children) == 0 {
+		return node.SpokenContent()
+	}
+	return ""
+}
+
+func adjacentTextUnit(graph *model.Graph, current model.ObjectID, direction int, unit model.TextUnit) (*model.Node, string, model.TextRange, bool) {
+	document, scoped := graph.DocumentRoot(current)
+	index := graph.Index(current)
+	if !scoped || index < 0 {
+		return nil, "", model.TextRange{}, false
+	}
+	for next := index + direction; next >= 0 && next < len(graph.Order); next += direction {
+		node := graph.Nodes[graph.Order[next]]
+		if node == nil || !graph.InDocument(node.ID, document) {
+			continue
+		}
+		text := navigableText(node)
+		if text == "" {
+			continue
+		}
+		ranges, err := model.TextUnitRanges(node.ID, text, unit)
+		if err != nil || len(ranges) == 0 {
+			continue
+		}
+		if direction > 0 {
+			return node, text, ranges[0], true
+		}
+		return node, text, ranges[len(ranges)-1], true
+	}
+	return nil, "", model.TextRange{}, false
 }
 
 func (e *Engine) navigateTable(command profile.Command) error {
@@ -426,21 +533,64 @@ func (e *Engine) navigateTable(command profile.Command) error {
 		e.mu.Unlock()
 		return errors.New("accessible graph is unavailable")
 	}
-	current := graph.Nodes[e.cursor.Object]
+	current := containingTableCell(graph, e.cursor.Object)
+	tableID := containingTable(graph, e.cursor.Object)
+	if !tableID.Valid() {
+		e.mu.Unlock()
+		return errors.New("cursor is not inside a table")
+	}
+	grid, maxRow, maxColumn := tableGrid(graph, tableID)
+	if len(grid) == 0 {
+		e.mu.Unlock()
+		return errors.New("table has no positioned cells")
+	}
+	if current == nil {
+		current = grid[[2]int{1, 1}]
+		if current == nil {
+			for row := 1; row <= maxRow && current == nil; row++ {
+				for column := 1; column <= maxColumn; column++ {
+					if grid[[2]int{row, column}] != nil {
+						current = grid[[2]int{row, column}]
+						break
+					}
+				}
+			}
+		}
+	}
 	if current == nil {
 		e.mu.Unlock()
-		return errors.New("cursor node is unavailable")
+		return errors.New("table has no navigable cells")
 	}
-	match := func(node *model.Node) bool {
-		if node.Role != "table cell" && node.Role != "cell" && node.Role != "row header" && node.Role != "column header" {
-			return false
-		}
-		if strings.Contains(command.ID, "Column") {
-			return node.Row == current.Row && node.Column == current.Column+command.Direction
-		}
-		return node.Column == current.Column && node.Row == current.Row+command.Direction
+	targetRow, targetColumn := current.Row, current.Column
+	rowStep, columnStep := 0, 0
+	switch command.ID {
+	case "previousTableColumn":
+		targetColumn, columnStep = current.Column-1, -1
+	case "nextTableColumn":
+		targetColumn, columnStep = current.Column+max(1, current.ColumnSpan), 1
+	case "previousTableRow":
+		targetRow, rowStep = current.Row-1, -1
+	case "nextTableRow":
+		targetRow, rowStep = current.Row+max(1, current.RowSpan), 1
+	case "firstTableColumn":
+		targetColumn, columnStep = 1, 1
+	case "lastTableColumn":
+		targetColumn, columnStep = maxColumn, -1
+	case "firstTableRow":
+		targetRow, rowStep = 1, 1
+	case "lastTableRow":
+		targetRow, rowStep = maxRow, -1
+	default:
+		e.mu.Unlock()
+		return fmt.Errorf("unsupported table command %q", command.ID)
 	}
-	next, ok := graph.MoveInDocument(current.ID, command.Direction, match)
+	next := grid[[2]int{targetRow, targetColumn}]
+	for next == nil && targetRow >= 1 && targetRow <= maxRow && targetColumn >= 1 && targetColumn <= maxColumn {
+		targetRow += rowStep
+		targetColumn += columnStep
+		next = grid[[2]int{targetRow, targetColumn}]
+	}
+	ok := next != nil && next.ID != current.ID
 	if ok {
 		e.cursor.Object, e.cursor.Offset = next.ID, 0
 	}
@@ -451,6 +601,75 @@ func (e *Engine) navigateTable(command profile.Command) error {
 	}
 	e.emit(e.presenter.Present(next, "tableNavigation"), next, command.ID, "tableNavigation", "normal")
 	return nil
+}
+
+func isTableCell(node *model.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch strings.ToLower(node.Role) {
+	case "table cell", "cell", "row header", "column header":
+		return true
+	default:
+		return false
+	}
+}
+
+func containingTableCell(graph *model.Graph, id model.ObjectID) *model.Node {
+	for steps := 0; id.Valid() && steps < 512; steps++ {
+		node := graph.Nodes[id]
+		if node == nil {
+			return nil
+		}
+		if isTableCell(node) {
+			return node
+		}
+		id = node.Parent
+	}
+	return nil
+}
+
+func containingTable(graph *model.Graph, id model.ObjectID) model.ObjectID {
+	if cell := containingTableCell(graph, id); cell != nil && cell.Table.Valid() {
+		return cell.Table
+	}
+	for steps := 0; id.Valid() && steps < 512; steps++ {
+		node := graph.Nodes[id]
+		if node == nil {
+			break
+		}
+		if strings.ToLower(node.Role) == "table" {
+			return node.ID
+		}
+		id = node.Parent
+	}
+	return model.ObjectID{}
+}
+
+func tableGrid(graph *model.Graph, tableID model.ObjectID) (map[[2]int]*model.Node, int, int) {
+	grid := map[[2]int]*model.Node{}
+	maxRow, maxColumn := 0, 0
+	if table := graph.Nodes[tableID]; table != nil {
+		maxRow, maxColumn = table.RowCount, table.ColumnCount
+	}
+	for _, id := range graph.Order {
+		node := graph.Nodes[id]
+		if !isTableCell(node) || node.Row < 1 || node.Column < 1 || containingTable(graph, node.ID) != tableID {
+			continue
+		}
+		rowSpan, columnSpan := max(1, node.RowSpan), max(1, node.ColumnSpan)
+		maxRow = max(maxRow, node.Row+rowSpan-1)
+		maxColumn = max(maxColumn, node.Column+columnSpan-1)
+		for row := node.Row; row < node.Row+rowSpan; row++ {
+			for column := node.Column; column < node.Column+columnSpan; column++ {
+				coordinate := [2]int{row, column}
+				if grid[coordinate] == nil {
+					grid[coordinate] = node
+				}
+			}
+		}
+	}
+	return grid, maxRow, maxColumn
 }
 
 func (e *Engine) activate(ctx context.Context) error {
@@ -497,7 +716,7 @@ func (e *Engine) report(command profile.Command) error {
 		return errors.New("cursor node is unavailable")
 	}
 	if command.ID != "sayAll" {
-		e.emit(e.presenter.Present(node, command.ID), node, command.ID, "report", "normal")
+		e.emit(e.presenter.Present(node, "report"), node, command.ID, "report", "normal")
 		return nil
 	}
 	e.mu.RLock()
@@ -596,7 +815,6 @@ func (e *Engine) startSynthesis(event events.Event, presentation profile.Present
 }
 
 func (e *Engine) eventLoop(ctx context.Context) {
-	var refreshTimer *time.Timer
 	for {
 		select {
 		case <-ctx.Done():
@@ -604,6 +822,18 @@ func (e *Engine) eventLoop(ctx context.Context) {
 		case native, ok := <-e.access.Events():
 			if !ok {
 				return
+			}
+			if strings.Contains(native.Name, ".Document.") {
+				e.mu.Lock()
+				e.focus = native.Source
+				e.browserWindowActive = true
+				e.webContentFocused = true
+				e.graphDirty = true
+				e.mu.Unlock()
+			} else if strings.Contains(native.Name, ".Object.") {
+				e.mu.Lock()
+				e.graphDirty = true
+				e.mu.Unlock()
 			}
 			if strings.HasSuffix(native.Name, ".Focus") || (strings.HasSuffix(native.Name, ".StateChanged") && native.Detail == "focused" && native.Detail1 != 0) {
 				if !e.handleFocus(ctx, native.Source) {
@@ -628,16 +858,6 @@ func (e *Engine) eventLoop(ctx context.Context) {
 					}
 				}
 			}
-			if refreshTimer != nil {
-				refreshTimer.Stop()
-			}
-			refreshTimer = time.AfterFunc(e.cfg.RefreshDebounce, func() {
-				refreshCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := e.Refresh(refreshCtx); err != nil {
-					e.logger.Warn("refresh accessible graph", "error", err)
-				}
-			})
 		}
 	}
 }
@@ -688,6 +908,13 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	}
 	isDocument := node.Role == "document web" || node.Role == "document frame"
 	e.mu.Lock()
+	if e.graph != nil {
+		if existing := e.graph.Nodes[id]; existing != nil {
+			node.RowHeaderText = append([]string(nil), existing.RowHeaderText...)
+			node.ColumnHeaderText = append([]string(nil), existing.ColumnHeaderText...)
+			node.RelationText = cloneRelationText(existing.RelationText)
+		}
+	}
 	e.focus = id
 	e.browserWindowActive = true
 	e.webContentFocused = isDocument || hasDocumentAncestor(e.graph, id)
@@ -701,6 +928,17 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	e.store.Append(events.Event{Kind: events.KindFocus, SessionID: e.session(), Source: &id, Text: node.Name, Reason: "nativeFocus"})
 	e.emit(e.presenter.Present(node, "focus"), node, "focus", "nativeFocus", "normal")
 	return isDocument
+}
+
+func cloneRelationText(source map[string][]string) map[string][]string {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string][]string, len(source))
+	for relation, values := range source {
+		result[relation] = append([]string(nil), values...)
+	}
+	return result
 }
 
 func hasDocumentAncestor(graph *model.Graph, id model.ObjectID) bool {

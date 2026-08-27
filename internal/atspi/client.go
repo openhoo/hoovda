@@ -121,13 +121,13 @@ func decodeSignal(signal *dbus.Signal) (NativeEvent, bool) {
 	return NativeEvent{Name: signal.Name, Source: model.ObjectID{Bus: signal.Sender, Path: string(signal.Path)}, Detail: detail, Detail1: detail1, Detail2: detail2, Value: value, Properties: properties}, true
 }
 
-func (c *Client) BrowserGraph(ctx context.Context, processHint string) (*model.Graph, error) {
+func (c *Client) BrowserGraph(ctx context.Context, processHint string, preferred model.ObjectID) (*model.Graph, error) {
 	desktop := ObjectReference{Bus: BusName, Path: DesktopPath}
 	children, err := c.children(ctx, desktop)
 	if err != nil {
 		return nil, fmt.Errorf("desktop children: %w", err)
 	}
-	var fallback *model.Graph
+	var candidates []*model.Graph
 	for _, child := range children {
 		graph, buildErr := c.buildGraph(ctx, child)
 		if buildErr != nil {
@@ -141,18 +141,56 @@ func (c *Client) BrowserGraph(ctx context.Context, processHint string) (*model.G
 		if !graphHasWebDocument(graph) {
 			continue
 		}
-		name := strings.ToLower(root.Name + " " + root.Description + " " + root.Attributes["toolkit"])
-		if strings.Contains(name, strings.ToLower(processHint)) {
-			return graph, nil
-		}
-		if fallback == nil {
-			fallback = graph
-		}
+		candidates = append(candidates, graph)
 	}
-	if fallback != nil {
-		return fallback, nil
+	if selected := selectBrowserGraph(candidates, processHint, preferred); selected != nil {
+		return selected, nil
 	}
 	return nil, errors.New("no accessible applications registered")
+}
+
+func selectBrowserGraph(candidates []*model.Graph, processHint string, preferred model.ObjectID) *model.Graph {
+	var selected *model.Graph
+	best := -1
+	processHint = strings.ToLower(strings.TrimSpace(processHint))
+	for _, graph := range candidates {
+		if graph == nil {
+			continue
+		}
+		if preferred.Valid() {
+			if _, ok := graph.Nodes[preferred]; ok {
+				return graph
+			}
+		}
+		rank := 0
+		if root := graph.Nodes[graph.Root]; root != nil {
+			name := strings.ToLower(root.Name + " " + root.Description + " " + root.Attributes["toolkit"])
+			if processHint != "" && strings.Contains(name, processHint) {
+				rank += 100
+			}
+			if root.HasState("active") {
+				rank += 8
+			}
+		}
+		for _, node := range graph.Nodes {
+			if node.Role != "document web" && node.Role != "document frame" {
+				continue
+			}
+			if node.HasState("showing") {
+				rank += 2
+			}
+			if node.HasState("focused") {
+				rank += 4
+			}
+		}
+		// Prefer the newest equally ranked desktop child. Chromium can leave a
+		// defunct bootstrap application registered while a navigated renderer is
+		// already focused.
+		if rank >= best {
+			selected, best = graph, rank
+		}
+	}
+	return selected
 }
 
 func graphHasWebDocument(graph *model.Graph) bool {
@@ -204,6 +242,7 @@ func (c *Client) buildGraph(ctx context.Context, root ObjectReference) (*model.G
 	if err != nil {
 		return nil, err
 	}
+	resolveGraphContext(graph)
 	if err := validateActiveWebDocument(graph); err != nil {
 		return nil, err
 	}
@@ -372,6 +411,18 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 		}
 	}
 	node := &model.Node{ID: ref.Model(), Children: childIDs, Role: strings.ToLower(role), Name: name, Description: description, Locale: locale, AccessibleID: accessibleID, Interfaces: interfaces, States: DecodeStates(stateWords), Attributes: attributes}
+	var relations []Relation
+	if err := object.CallWithContext(ctx, InterfaceAccessible+".GetRelationSet", 0).Store(&relations); err == nil {
+		node.Relations = make(map[string][]model.ObjectID, len(relations))
+		for _, relation := range relations {
+			name := relationName(relation.Type)
+			for _, target := range relation.Targets {
+				if target.Valid() {
+					node.Relations[name] = append(node.Relations[name], target.Model())
+				}
+			}
+		}
+	}
 	if slicesContains(interfaces, InterfaceText) {
 		var text string
 		if err := object.CallWithContext(ctx, InterfaceText+".GetText", 0, int32(0), int32(-1)).Store(&text); err == nil {
@@ -398,6 +449,32 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 			// AT-SPI coordinates are zero based. Presentation and navigation use
 			// human-facing one-based row and column numbers.
 			node.Row, node.Column = int(position.Row)+1, int(position.Column)+1
+		}
+		if value, err := int32Property(object, InterfaceTableCell+".RowSpan"); err == nil && value > 0 {
+			node.RowSpan = int(value)
+		}
+		if value, err := int32Property(object, InterfaceTableCell+".ColumnSpan"); err == nil && value > 0 {
+			node.ColumnSpan = int(value)
+		}
+		var table ObjectReference
+		if err := tupleProperty(object, InterfaceTableCell+".Table", &table); err == nil && table.Valid() {
+			node.Table = table.Model()
+		}
+		var headers []ObjectReference
+		if err := object.CallWithContext(ctx, InterfaceTableCell+".GetRowHeaderCells", 0).Store(&headers); err == nil {
+			for _, header := range headers {
+				if header.Valid() {
+					node.RowHeaders = append(node.RowHeaders, header.Model())
+				}
+			}
+		}
+		headers = nil
+		if err := object.CallWithContext(ctx, InterfaceTableCell+".GetColumnHeaderCells", 0).Store(&headers); err == nil {
+			for _, header := range headers {
+				if header.Valid() {
+					node.ColumnHeaders = append(node.ColumnHeaders, header.Model())
+				}
+			}
 		}
 	}
 	if slicesContains(interfaces, InterfaceValue) {
@@ -430,6 +507,41 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 		node.SetSize, _ = strconv.Atoi(value)
 	}
 	return node, nil
+}
+
+func resolveGraphContext(graph *model.Graph) {
+	if graph == nil {
+		return
+	}
+	resolve := func(ids []model.ObjectID) []string {
+		values := make([]string, 0, len(ids))
+		seen := map[string]bool{}
+		for _, id := range ids {
+			node := graph.Nodes[id]
+			if node == nil {
+				continue
+			}
+			value := node.SpokenContent()
+			if value != "" && !seen[value] {
+				seen[value] = true
+				values = append(values, value)
+			}
+		}
+		return values
+	}
+	for _, node := range graph.Nodes {
+		node.RowHeaderText = resolve(node.RowHeaders)
+		node.ColumnHeaderText = resolve(node.ColumnHeaders)
+		if len(node.Relations) == 0 {
+			continue
+		}
+		node.RelationText = make(map[string][]string, len(node.Relations))
+		for relation, ids := range node.Relations {
+			if values := resolve(ids); len(values) > 0 {
+				node.RelationText[relation] = values
+			}
+		}
+	}
 }
 
 func (c *Client) children(ctx context.Context, ref ObjectReference) ([]ObjectReference, error) {
@@ -513,16 +625,21 @@ func slicesContains(values []string, target string) bool {
 	return false
 }
 
-func (c *Client) WaitForBrowser(ctx context.Context, hint string, interval time.Duration) (*model.Graph, error) {
+func (c *Client) WaitForBrowser(ctx context.Context, hint string, preferred model.ObjectID, interval time.Duration) (*model.Graph, error) {
 	if interval <= 0 {
 		interval = 100 * time.Millisecond
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		graph, err := c.BrowserGraph(ctx, hint)
+		graph, err := c.BrowserGraph(ctx, hint, preferred)
 		if err == nil && graphHasWebDocument(graph) {
-			return graph, nil
+			if !preferred.Valid() {
+				return graph, nil
+			}
+			if _, ok := graph.Nodes[preferred]; ok {
+				return graph, nil
+			}
 		}
 		select {
 		case <-ctx.Done():

@@ -65,3 +65,69 @@ func TestValidateActiveWebDocumentRejectsMissingActiveFrameChild(t *testing.T) {
 		t.Fatalf("validation error = %v", err)
 	}
 }
+
+func TestRelationNameUsesPinnedATSPIEnumeration(t *testing.T) {
+	if got := relationName(18); got != "described by" {
+		t.Fatalf("relation 18 = %q", got)
+	}
+	if got := relationName(99); got != "relation-99" {
+		t.Fatalf("unknown relation = %q", got)
+	}
+}
+
+func TestResolveGraphContextDereferencesHeadersAndRelations(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	header := model.ObjectID{Bus: "app", Path: "/header"}
+	description := model.ObjectID{Bus: "app", Path: "/description"}
+	cell := model.ObjectID{Bus: "app", Path: "/cell"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:        {ID: root, Role: "document web", Children: []model.ObjectID{header, description, cell}},
+		header:      {ID: header, Parent: root, Role: "column header", Name: "Price"},
+		description: {ID: description, Parent: root, Role: "paragraph", Text: "Before tax"},
+		cell: {
+			ID:            cell,
+			Parent:        root,
+			Role:          "table cell",
+			Name:          "12",
+			ColumnHeaders: []model.ObjectID{header, header},
+			Relations:     map[string][]model.ObjectID{"described by": {description}},
+		},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveGraphContext(graph)
+	if got := graph.Nodes[cell].ColumnHeaderText; len(got) != 1 || got[0] != "Price" {
+		t.Fatalf("headers = %#v", got)
+	}
+	if got := graph.Nodes[cell].RelationText["described by"]; len(got) != 1 || got[0] != "Before tax" {
+		t.Fatalf("relation text = %#v", got)
+	}
+}
+
+func TestSelectBrowserGraphUsesFocusedObjectOverStaleExactMatch(t *testing.T) {
+	staleRoot := model.ObjectID{Bus: "app", Path: "/stale-root"}
+	staleDocument := model.ObjectID{Bus: "app", Path: "/stale-document"}
+	activeRoot := model.ObjectID{Bus: "app", Path: "/active-root"}
+	activeDocument := model.ObjectID{Bus: "app", Path: "/active-document"}
+	stale, err := model.NewGraph(staleRoot, map[model.ObjectID]*model.Node{
+		staleRoot:     {ID: staleRoot, Role: "application", Name: "Chromium", Children: []model.ObjectID{staleDocument}},
+		staleDocument: {ID: staleDocument, Parent: staleRoot, Role: "document web", Name: "Bootstrap", States: map[string]bool{"focused": true, "showing": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := model.NewGraph(activeRoot, map[model.ObjectID]*model.Node{
+		activeRoot:     {ID: activeRoot, Role: "application", Name: "Chromium", Children: []model.ObjectID{activeDocument}},
+		activeDocument: {ID: activeDocument, Parent: activeRoot, Role: "document web", Name: "Checkout", States: map[string]bool{"focused": true, "showing": true}},
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := selectBrowserGraph([]*model.Graph{stale, active}, "chromium", activeDocument); got != active {
+		t.Fatalf("selected graph = %#v", got)
+	}
+	if got := selectBrowserGraph([]*model.Graph{stale, active}, "chromium", model.ObjectID{}); got != active {
+		t.Fatalf("equal-rank fallback did not select newest child: %#v", got)
+	}
+}

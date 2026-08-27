@@ -26,31 +26,39 @@ type Rect struct {
 }
 
 type Node struct {
-	ID            ObjectID              `json:"id"`
-	Parent        ObjectID              `json:"parent"`
-	Children      []ObjectID            `json:"children"`
-	Role          string                `json:"role"`
-	Name          string                `json:"name"`
-	Description   string                `json:"description,omitempty"`
-	Text          string                `json:"text,omitempty"`
-	Locale        string                `json:"locale,omitempty"`
-	AccessibleID  string                `json:"accessibleId,omitempty"`
-	Interfaces    []string              `json:"interfaces,omitempty"`
-	States        map[string]bool       `json:"states,omitempty"`
-	Attributes    map[string]string     `json:"attributes,omitempty"`
-	Relations     map[string][]ObjectID `json:"relations,omitempty"`
-	Bounds        Rect                  `json:"bounds"`
-	HeadingLevel  int                   `json:"headingLevel,omitempty"`
-	Row           int                   `json:"row,omitempty"`
-	Column        int                   `json:"column,omitempty"`
-	RowCount      int                   `json:"rowCount,omitempty"`
-	ColumnCount   int                   `json:"columnCount,omitempty"`
-	ValueText     string                `json:"valueText,omitempty"`
-	CurrentValue  *float64              `json:"currentValue,omitempty"`
-	MinimumValue  *float64              `json:"minimumValue,omitempty"`
-	MaximumValue  *float64              `json:"maximumValue,omitempty"`
-	PositionInSet int                   `json:"positionInSet,omitempty"`
-	SetSize       int                   `json:"setSize,omitempty"`
+	ID               ObjectID              `json:"id"`
+	Parent           ObjectID              `json:"parent"`
+	Children         []ObjectID            `json:"children"`
+	Role             string                `json:"role"`
+	Name             string                `json:"name"`
+	Description      string                `json:"description,omitempty"`
+	Text             string                `json:"text,omitempty"`
+	Locale           string                `json:"locale,omitempty"`
+	AccessibleID     string                `json:"accessibleId,omitempty"`
+	Interfaces       []string              `json:"interfaces,omitempty"`
+	States           map[string]bool       `json:"states,omitempty"`
+	Attributes       map[string]string     `json:"attributes,omitempty"`
+	Relations        map[string][]ObjectID `json:"relations,omitempty"`
+	Bounds           Rect                  `json:"bounds"`
+	HeadingLevel     int                   `json:"headingLevel,omitempty"`
+	Row              int                   `json:"row,omitempty"`
+	Column           int                   `json:"column,omitempty"`
+	RowSpan          int                   `json:"rowSpan,omitempty"`
+	ColumnSpan       int                   `json:"columnSpan,omitempty"`
+	RowCount         int                   `json:"rowCount,omitempty"`
+	ColumnCount      int                   `json:"columnCount,omitempty"`
+	Table            ObjectID              `json:"table,omitempty"`
+	RowHeaders       []ObjectID            `json:"rowHeaders,omitempty"`
+	ColumnHeaders    []ObjectID            `json:"columnHeaders,omitempty"`
+	RowHeaderText    []string              `json:"rowHeaderText,omitempty"`
+	ColumnHeaderText []string              `json:"columnHeaderText,omitempty"`
+	RelationText     map[string][]string   `json:"relationText,omitempty"`
+	ValueText        string                `json:"valueText,omitempty"`
+	CurrentValue     *float64              `json:"currentValue,omitempty"`
+	MinimumValue     *float64              `json:"minimumValue,omitempty"`
+	MaximumValue     *float64              `json:"maximumValue,omitempty"`
+	PositionInSet    int                   `json:"positionInSet,omitempty"`
+	SetSize          int                   `json:"setSize,omitempty"`
 }
 
 func (n Node) HasState(state string) bool { return n.States[state] }

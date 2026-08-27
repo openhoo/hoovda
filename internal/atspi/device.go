@@ -211,9 +211,17 @@ func normalizeEventKey(event DeviceEvent) string {
 			return "space"
 		case "\r", "\n":
 			return "enter"
+		case "prior", "page_up":
+			return "pageup"
+		case "next", "page_down":
+			return "pagedown"
 		}
 		return value
 	}
-	keys := map[int32]string{9: "escape", 23: "tab", 36: "enter", 65: "space", 111: "up", 113: "left", 114: "right", 116: "down", 118: "insert", 66: "capslock"}
+	keys := map[int32]string{
+		9: "escape", 23: "tab", 36: "enter", 65: "space", 66: "capslock",
+		110: "home", 111: "up", 112: "pageup", 113: "left", 114: "right",
+		115: "end", 116: "down", 117: "pagedown", 118: "insert",
+	}
 	return keys[int32(event.HWCode)]
 }

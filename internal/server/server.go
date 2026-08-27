@@ -268,6 +268,10 @@ func (s *Server) document(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.lookupActive(w, r.PathValue("session")); !ok {
 		return
 	}
+	if err := s.engine.Sync(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "document_refresh", err)
+		return
+	}
 	state := s.engine.State()
 	writeJSON(w, http.StatusOK, DocumentResult{Profile: s.cfg.Profile, Locale: s.cfg.Locale, Revision: state.GraphRevision, Nodes: s.engine.DocumentSnapshot()})
 }
@@ -301,6 +305,13 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "event_export", err)
+		return
+	}
+	refreshCtx, cancelRefresh := context.WithTimeout(r.Context(), s.cfg.ActionTimeout)
+	refreshErr := s.engine.Sync(refreshCtx)
+	cancelRefresh()
+	if refreshErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "document_refresh", refreshErr)
 		return
 	}
 	state := s.engine.State()

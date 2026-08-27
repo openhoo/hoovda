@@ -22,12 +22,14 @@ speech, ordered braille, and mode match at every step. Missing files, changed
 hashes, path escapes, symlink escapes, unknown fields, incomplete coverage, or
 any trace mismatch fail closed.
 
-Known parity gaps remain: character, word, and line navigation still use a
-node-level cursor; complex table and relationship presentation is incomplete;
-elements-list and find dialogs are reserved but not advertised; math, embedded
-content, browser edge cases, and exact speech or braille parity lack independent
-reference coverage. Linux/amd64 Chromium and `en-US`/`de-DE` are the only
-declared targets. Current code is a testable foundation, not full NVDA parity.
+Known parity gaps remain: elements-list and find dialogs are reserved but not
+advertised; math, embedded content, browser edge cases, and exact speech or
+braille parity lack independent reference coverage. Character, word, and line
+navigation now use a Unicode-rune cursor. Table navigation now resolves AT-SPI
+row and column headers, row and column spans, descriptions, and relationships,
+but exact NVDA behavior remains gated on reference traces. Linux/amd64 Chromium
+and `en-US`/`de-DE` are the only declared targets. Current code is a testable
+foundation, not full NVDA parity.
 
 ## Local development
 

@@ -22,8 +22,8 @@ func NewAccessibility(client *atspi.Client) *Accessibility {
 	return a
 }
 
-func (a *Accessibility) BrowserGraph(ctx context.Context, hint string) (*model.Graph, error) {
-	return a.client.WaitForBrowser(ctx, hint, 25*time.Millisecond)
+func (a *Accessibility) BrowserGraph(ctx context.Context, hint string, preferred model.ObjectID) (*model.Graph, error) {
+	return a.client.WaitForBrowser(ctx, hint, preferred, 25*time.Millisecond)
 }
 
 func (a *Accessibility) ReadNode(ctx context.Context, id model.ObjectID) (*model.Node, error) {

@@ -19,7 +19,9 @@ type fakeAccess struct {
 	events chan NativeEvent
 }
 
-func (f *fakeAccess) BrowserGraph(context.Context, string) (*model.Graph, error) { return f.graph, nil }
+func (f *fakeAccess) BrowserGraph(context.Context, string, model.ObjectID) (*model.Graph, error) {
+	return f.graph, nil
+}
 func (f *fakeAccess) ReadNode(_ context.Context, id model.ObjectID) (*model.Node, error) {
 	return f.graph.Nodes[id], nil
 }
@@ -75,6 +77,177 @@ func TestQuickNavigationProducesSpeechAndBraille(t *testing.T) {
 	}
 }
 
+func TestCharacterNavigationUsesRuneOffsetsInsideNode(t *testing.T) {
+	engine, store := fixtureEngine(t)
+	if err := engine.ExecuteDirect(context.Background(), "nextHeading"); err != nil {
+		t.Fatal(err)
+	}
+	before := store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "nextCharacter"); err != nil {
+		t.Fatal(err)
+	}
+	if state := engine.State(); state.Cursor.Offset != 1 {
+		t.Fatalf("cursor after next character = %#v", state.Cursor)
+	}
+	if speech := speechAfter(t, store, before); speech != "h" {
+		t.Fatalf("next character speech = %q", speech)
+	}
+	before = store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "previousCharacter"); err != nil {
+		t.Fatal(err)
+	}
+	if state := engine.State(); state.Cursor.Offset != 0 {
+		t.Fatalf("cursor after previous character = %#v", state.Cursor)
+	}
+	if speech := speechAfter(t, store, before); speech != "C" {
+		t.Fatalf("previous character speech = %q", speech)
+	}
+}
+
+func TestTextNavigationSkipsChromiumEmbeddedObjectMarker(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	heading := model.ObjectID{Bus: "app", Path: "/heading"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:    {ID: root, Role: "document web", Text: "\ufffc", Children: []model.ObjectID{heading}},
+		heading: {ID: heading, Parent: root, Role: "heading", Text: "Hello", HeadingLevel: 1},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, store := engineForGraph(t, graph)
+	if err := engine.ExecuteDirect(context.Background(), "documentStart"); err != nil {
+		t.Fatal(err)
+	}
+	before := store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "nextCharacter"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "H" {
+		t.Fatalf("next character speech = %q", speech)
+	}
+	if got := engine.State().Cursor; got.Object != heading || got.Offset != 0 {
+		t.Fatalf("cursor = %#v", got)
+	}
+}
+
+func TestWordAndLineNavigationRemainInsideTextNode(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	paragraph := model.ObjectID{Bus: "app", Path: "/paragraph"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:      {ID: root, Role: "document web", Name: "Example", Children: []model.ObjectID{paragraph}},
+		paragraph: {ID: paragraph, Parent: root, Role: "paragraph", Text: "First line\n\nThird line", Attributes: map[string]string{"tag": "p"}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, store := engineForGraph(t, graph)
+	if err := engine.ExecuteDirect(context.Background(), "nextParagraph"); err != nil {
+		t.Fatal(err)
+	}
+	before := store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "nextWord"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "line" {
+		t.Fatalf("next word speech = %q", speech)
+	}
+	if state := engine.State(); state.Cursor.Object != paragraph || state.Cursor.Offset != 6 {
+		t.Fatalf("word cursor = %#v", state.Cursor)
+	}
+	if err := engine.ExecuteDirect(context.Background(), "documentStart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.ExecuteDirect(context.Background(), "nextParagraph"); err != nil {
+		t.Fatal(err)
+	}
+	before = store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "nextLine"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "blank" {
+		t.Fatalf("blank line speech = %q", speech)
+	}
+	if state := engine.State(); state.Cursor.Object != paragraph || state.Cursor.Offset != 11 {
+		t.Fatalf("line cursor = %#v", state.Cursor)
+	}
+}
+
+func TestTableNavigationUsesSpansAndFirstLastCommands(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	table := model.ObjectID{Bus: "app", Path: "/table"}
+	first := model.ObjectID{Bus: "app", Path: "/first"}
+	wide := model.ObjectID{Bus: "app", Path: "/wide"}
+	last := model.ObjectID{Bus: "app", Path: "/last"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root: {ID: root, Role: "document web", Children: []model.ObjectID{table}},
+		table: {
+			ID: table, Parent: root, Role: "table", Name: "Results", RowCount: 2, ColumnCount: 3,
+			Children: []model.ObjectID{first, wide, last},
+		},
+		first: {ID: first, Parent: table, Table: table, Role: "column header", Name: "First", Row: 1, Column: 1, States: map[string]bool{"enabled": true}},
+		wide:  {ID: wide, Parent: table, Table: table, Role: "table cell", Name: "Wide", Row: 2, Column: 1, ColumnSpan: 2, States: map[string]bool{"enabled": true}},
+		last:  {ID: last, Parent: table, Table: table, Role: "table cell", Name: "Last", Row: 2, Column: 3, States: map[string]bool{"enabled": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, store := engineForGraph(t, graph)
+	if err := engine.ExecuteDirect(context.Background(), "nextTable"); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.ExecuteDirect(context.Background(), "lastTableRow"); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.State().Cursor.Object; got != wide {
+		t.Fatalf("last row cursor = %#v", got)
+	}
+	before := store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "nextTableColumn"); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.State().Cursor.Object; got != last {
+		t.Fatalf("span-aware next column cursor = %#v", got)
+	}
+	if speech := speechAfter(t, store, before); speech != "Last cell row 2 column 3" {
+		t.Fatalf("next column speech = %q", speech)
+	}
+	if err := engine.ExecuteDirect(context.Background(), "firstTableColumn"); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.State().Cursor.Object; got != wide {
+		t.Fatalf("first column cursor = %#v", got)
+	}
+}
+
+func speechAfter(t *testing.T, store *events.Store, after uint64) string {
+	t.Helper()
+	items, _, err := store.Snapshot(after, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range items {
+		if event.Kind == events.KindSpeech {
+			return event.Text
+		}
+	}
+	return ""
+}
+
+func engineForGraph(t *testing.T, graph *model.Graph) (*Engine, *events.Store) {
+	t.Helper()
+	store := events.NewStore(200)
+	presenter, _ := profile.NewPresenter("en-US")
+	access := &fakeAccess{graph: graph, events: make(chan NativeEvent, 10)}
+	value := New(access, store, presenter, braille.Passthrough{}, synth.Silence{SampleRate: 22050}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Config{Locale: "en-US", KeyboardLayout: "desktop"})
+	if err := value.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := value.BeginSession("test"); err != nil {
+		t.Fatal(err)
+	}
+	return value, store
+}
+
 func TestToggleFocusMode(t *testing.T) {
 	engine, _ := fixtureEngine(t)
 	if err := engine.ExecuteDirect(context.Background(), "toggleFocusMode"); err != nil {
@@ -82,6 +255,31 @@ func TestToggleFocusMode(t *testing.T) {
 	}
 	if engine.State().Cursor.Mode != "focus" {
 		t.Fatalf("state = %#v", engine.State())
+	}
+}
+
+func TestFocusPresentationUsesResolvedGraphRelations(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	entry := model.ObjectID{Bus: "app", Path: "/entry"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root: {ID: root, Role: "document web", Children: []model.ObjectID{entry}},
+		entry: {
+			ID: entry, Parent: root, Role: "entry", Name: "Email",
+			States:       map[string]bool{"enabled": true, "focusable": true},
+			RelationText: map[string][]string{"described by": {"Work address"}},
+		},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, store := engineForGraph(t, graph)
+	before := store.Cursor()
+	engine.handleFocus(context.Background(), entry)
+	if !engine.State().WebContentFocused {
+		t.Fatal("focus in web document was not recognized")
+	}
+	if speech := speechAfter(t, store, before); speech != "Email entry Work address" {
+		t.Fatalf("focus speech = %q", speech)
 	}
 }
 
@@ -205,6 +403,100 @@ func TestDocumentFocusRefreshesNavigationGraph(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("events = %#v", got)
+	}
+}
+
+func TestDocumentLoadInvalidatesGraphAndTargetsNewDocument(t *testing.T) {
+	oldRoot := model.ObjectID{Bus: "app", Path: "/old-root"}
+	oldHeading := model.ObjectID{Bus: "app", Path: "/old-heading"}
+	newRoot := model.ObjectID{Bus: "app", Path: "/new-root"}
+	newHeading := model.ObjectID{Bus: "app", Path: "/new-heading"}
+	oldGraph, err := model.NewGraph(oldRoot, map[model.ObjectID]*model.Node{
+		oldRoot:    {ID: oldRoot, Role: "document web", Name: "Bootstrap", Children: []model.ObjectID{oldHeading}},
+		oldHeading: {ID: oldHeading, Parent: oldRoot, Role: "heading", Name: "Runtime ready", HeadingLevel: 1},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newGraph, err := model.NewGraph(newRoot, map[model.ObjectID]*model.Node{
+		newRoot:    {ID: newRoot, Role: "document web", Name: "Checkout", Children: []model.ObjectID{newHeading}},
+		newHeading: {ID: newHeading, Parent: newRoot, Role: "heading", Name: "Checkout", HeadingLevel: 1},
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := &fakeAccess{graph: oldGraph, events: make(chan NativeEvent, 1)}
+	store := events.NewStore(100)
+	presenter, _ := profile.NewPresenter("en-US")
+	engine := New(access, store, presenter, braille.Passthrough{}, synth.Silence{SampleRate: 22050}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Config{Locale: "en-US", KeyboardLayout: "desktop"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := engine.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.BeginSession("test"); err != nil {
+		t.Fatal(err)
+	}
+	access.graph = newGraph
+	access.events <- NativeEvent{Name: "org.a11y.atspi.Event.Document.LoadComplete", Source: newRoot}
+	deadline := time.Now().Add(time.Second)
+	for engine.State().Focus != newRoot && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := engine.ExecuteDirect(context.Background(), "nextHeading"); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.State(); got.GraphRevision != 2 || got.Cursor.Object != newHeading {
+		t.Fatalf("state = %#v", got)
+	}
+}
+
+func TestGraphRefreshSurvivesFocusedControlRemoval(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	button := model.ObjectID{Bus: "app", Path: "/button"}
+	heading := model.ObjectID{Bus: "app", Path: "/heading"}
+	oldGraph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:   {ID: root, Role: "document web", Name: "Checkout", Children: []model.ObjectID{button}},
+		button: {ID: button, Parent: root, Role: "push button", Name: "Continue", States: map[string]bool{"focusable": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newGraph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:    {ID: root, Role: "document web", Name: "Checkout", Children: []model.ObjectID{heading}},
+		heading: {ID: heading, Parent: root, Role: "heading", Name: "Complete", HeadingLevel: 1},
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := &fakeAccess{graph: oldGraph, events: make(chan NativeEvent, 1)}
+	store := events.NewStore(100)
+	presenter, _ := profile.NewPresenter("en-US")
+	engine := New(access, store, presenter, braille.Passthrough{}, synth.Silence{SampleRate: 22050}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Config{Locale: "en-US", KeyboardLayout: "desktop"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := engine.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	engine.handleFocus(context.Background(), button)
+	access.graph = newGraph
+	access.events <- NativeEvent{Name: "org.a11y.atspi.Event.Object.ChildrenChanged", Source: root}
+	deadline := time.Now().Add(time.Second)
+	dirty := false
+	for !dirty && time.Now().Before(deadline) {
+		engine.mu.RLock()
+		dirty = engine.graphDirty
+		engine.mu.RUnlock()
+		time.Sleep(time.Millisecond)
+	}
+	if !dirty {
+		t.Fatal("children-changed event did not invalidate graph")
+	}
+	if err := engine.ExecuteDirect(context.Background(), "nextHeading"); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.State(); got.GraphRevision != 2 || got.Cursor.Object != heading {
+		t.Fatalf("state = %#v", got)
 	}
 }
 
