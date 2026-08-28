@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/openhoo/hoovda/internal/model"
@@ -62,6 +63,99 @@ func TestGermanHeadingAndLandmarkBrailleUsePinnedNVDALabels(t *testing.T) {
 	landmark := presenter.Present(&model.Node{Role: "landmark", Attributes: map[string]string{"xml-roles": "main"}, States: map[string]bool{"enabled": true}}, "quickNavigation")
 	if landmark.Speech != "Haupt Sprungmarke" {
 		t.Fatalf("landmark = %#v", landmark)
+	}
+}
+
+func TestQuickNavigationBoundariesMatchPinnedNVDACatalog(t *testing.T) {
+	want := map[string]map[string][2]string{
+		"en-US": {
+			"heading":        {"no next heading", "no previous heading"},
+			"table":          {"no next table", "no previous table"},
+			"link":           {"no next link", "no previous link"},
+			"visitedLink":    {"no next visited link", "no previous visited link"},
+			"unvisitedLink":  {"no next unvisited link", "no previous unvisited link"},
+			"formField":      {"no next form field", "no previous form field"},
+			"list":           {"no next list", "no previous list"},
+			"listItem":       {"no next list item", "no previous list item"},
+			"button":         {"no next button", "no previous button"},
+			"edit":           {"no next edit field", "no previous edit field"},
+			"frame":          {"no next frame", "no previous frame"},
+			"separator":      {"no next separator", "no previous separator"},
+			"radioButton":    {"no next radio button", "no previous radio button"},
+			"comboBox":       {"no next combo box", "no previous combo box"},
+			"checkBox":       {"no next check box", "no previous check box"},
+			"graphic":        {"no next graphic", "no previous graphic"},
+			"blockQuote":     {"no next block quote", "no previous block quote"},
+			"notLinkBlock":   {"no more text after a block of links", "no more text before a block of links"},
+			"landmark":       {"no next landmark", "no previous landmark"},
+			"embeddedObject": {"no next embedded object", "no previous embedded object"},
+			"annotation":     {"no next annotation", "no previous annotation"},
+			"error":          {"no next error", "no previous error"},
+			"textParagraph":  {"no next text paragraph", "no previous text paragraph"},
+		},
+		"de-DE": {
+			"heading":        {"Keine weitere Überschrift", "Keine vorherige Überschrift"},
+			"table":          {"Keine weitere Tabelle", "Keine vorherige Tabelle"},
+			"link":           {"Kein weiterer Link", "Kein vorheriger Link"},
+			"visitedLink":    {"Kein weiterer besuchter Link", "Kein vorheriger besuchter Link"},
+			"unvisitedLink":  {"Kein weiterer unbesuchter Link", "Kein vorheriger unbesuchter Link"},
+			"formField":      {"Kein weiteres Formularfeld", "Kein vorheriges Formularfeld"},
+			"list":           {"Keine weitere Liste", "Keine vorherige Liste"},
+			"listItem":       {"Kein weiterer Listeneintrag", "Kein vorheriger Listeneintrag"},
+			"button":         {"Kein weiterer Schalter", "Kein vorheriger Schalter"},
+			"edit":           {"Kein weiteres Eingabefeld", "Kein vorheriges Eingabefeld"},
+			"frame":          {"Kein weiterer Rahmen", "Kein weiterer Rahmen"},
+			"separator":      {"Keine weitere Trennlinie", "Keine vorherige Trennlinie"},
+			"radioButton":    {"Kein weiterer Auswahlschalter", "Kein vorheriger Auswahlschalter"},
+			"comboBox":       {"Kein weiteres Kombinationsfeld", "Kein vorheriges Kombinationsfeld"},
+			"checkBox":       {"Kein weiteres Kontrollfeld", "Kein vorheriges Kontrollfeld"},
+			"graphic":        {"Keine weitere Grafik", "Keine vorherige Grafik"},
+			"blockQuote":     {"Kein weiterer Zitatblock", "Kein vorheriger Zitatblock"},
+			"notLinkBlock":   {"Kein weiterer Text nach dem Abschnitt der Links", "Kein weiterer Text vor dem Abschnitt der Links"},
+			"landmark":       {"Keine weitere Sprungmarke", "Keine vorherige Sprungmarke"},
+			"embeddedObject": {"Kein weiteres eingebettetes Objekt", "Kein vorheriges eingebettetes Objekt"},
+			"annotation":     {"Keine weitere Anmerkung", "Keine vorherige Anmerkung"},
+			"error":          {"Kein weiterer Fehler", "Kein vorheriger Fehler"},
+			"textParagraph":  {"Keine weiteren Absätze", "kein vorheriger Textabsatz"},
+		},
+	}
+	for locale, targets := range want {
+		presenter, _ := NewPresenter(locale)
+		for target, messages := range targets {
+			for index, direction := range []int{1, -1} {
+				got := presenter.NoTarget(target, direction)
+				if got.Speech != messages[index] || got.Braille != messages[index] {
+					t.Errorf("%s %s direction %d = speech %q, braille %q; want %q", locale, target, direction, got.Speech, got.Braille, messages[index])
+				}
+			}
+		}
+		for level := 1; level <= 9; level++ {
+			target := fmt.Sprintf("heading%d", level)
+			next := fmt.Sprintf("No next heading at level %d", level)
+			previous := fmt.Sprintf("No previous heading at level %d", level)
+			if locale == "de-DE" {
+				next = fmt.Sprintf("Keine weitere Überschrift auf Ebene %d", level)
+				previous = fmt.Sprintf("Keine vorherige Überschrift auf Ebene %d", level)
+			}
+			if got := presenter.NoTarget(target, 1).Speech; got != next {
+				t.Errorf("%s %s next = %q; want %q", locale, target, got, next)
+			}
+			if got := presenter.NoTarget(target, -1).Speech; got != previous {
+				t.Errorf("%s %s previous = %q; want %q", locale, target, got, previous)
+			}
+		}
+	}
+}
+
+func TestQuickNavigationCommandCatalogHasPinnedBoundaries(t *testing.T) {
+	presenter, _ := NewPresenter("en-US")
+	for _, command := range Commands() {
+		if command.Category != "quickNavigation" {
+			continue
+		}
+		if got := presenter.quickNavigationBoundary(command.Target, command.Direction); got == "" {
+			t.Errorf("quick-navigation command %s target %q has no pinned boundary", command.ID, command.Target)
+		}
 	}
 }
 

@@ -413,11 +413,7 @@ func (e *Engine) navigate(command profile.Command) error {
 	}
 	e.mu.Unlock()
 	if !ok {
-		target := command.Target
-		if target == "textParagraph" {
-			target = "text paragraph"
-		}
-		e.emit(e.presenter.NoTarget(target, command.Direction), nil, command.ID, "navigationBoundary", "normal")
+		e.emit(e.presenter.NoTarget(command.Target, command.Direction), nil, command.ID, "navigationBoundary", "normal")
 		return nil
 	}
 	presentation := e.presenter.Present(node, "quickNavigation")

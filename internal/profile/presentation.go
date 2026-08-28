@@ -471,19 +471,91 @@ func (p *Presenter) landmark(role string) string {
 }
 
 func (p *Presenter) NoTarget(target string, direction int) Presentation {
-	word := target
-	if p.locale == "de-DE" {
-		prefix := "Kein nächstes"
-		if direction < 0 {
-			prefix = "Kein vorheriges"
-		}
-		return Presentation{Speech: prefix + " " + word, Braille: prefix + " " + word}
+	if text := p.quickNavigationBoundary(target, direction); text != "" {
+		return Presentation{Speech: text, Braille: text}
 	}
 	prefix := "no next"
 	if direction < 0 {
 		prefix = "no previous"
 	}
-	return Presentation{Speech: prefix + " " + word, Braille: prefix + " " + word}
+	return Presentation{Speech: prefix + " " + target, Braille: prefix + " " + target}
+}
+
+func (p *Presenter) quickNavigationBoundary(target string, direction int) string {
+	if strings.HasPrefix(target, "heading") && len(target) == len("heading1") {
+		level := target[len(target)-1:]
+		if p.locale == "de-DE" {
+			if direction < 0 {
+				return "Keine vorherige Überschrift auf Ebene " + level
+			}
+			return "Keine weitere Überschrift auf Ebene " + level
+		}
+		if direction < 0 {
+			return "No previous heading at level " + level
+		}
+		return "No next heading at level " + level
+	}
+	english := map[string][2]string{
+		"heading":        {"no next heading", "no previous heading"},
+		"table":          {"no next table", "no previous table"},
+		"link":           {"no next link", "no previous link"},
+		"visitedLink":    {"no next visited link", "no previous visited link"},
+		"unvisitedLink":  {"no next unvisited link", "no previous unvisited link"},
+		"formField":      {"no next form field", "no previous form field"},
+		"list":           {"no next list", "no previous list"},
+		"listItem":       {"no next list item", "no previous list item"},
+		"button":         {"no next button", "no previous button"},
+		"edit":           {"no next edit field", "no previous edit field"},
+		"frame":          {"no next frame", "no previous frame"},
+		"separator":      {"no next separator", "no previous separator"},
+		"radioButton":    {"no next radio button", "no previous radio button"},
+		"comboBox":       {"no next combo box", "no previous combo box"},
+		"checkBox":       {"no next check box", "no previous check box"},
+		"graphic":        {"no next graphic", "no previous graphic"},
+		"blockQuote":     {"no next block quote", "no previous block quote"},
+		"notLinkBlock":   {"no more text after a block of links", "no more text before a block of links"},
+		"landmark":       {"no next landmark", "no previous landmark"},
+		"embeddedObject": {"no next embedded object", "no previous embedded object"},
+		"annotation":     {"no next annotation", "no previous annotation"},
+		"error":          {"no next error", "no previous error"},
+		"textParagraph":  {"no next text paragraph", "no previous text paragraph"},
+	}
+	if p.locale != "de-DE" {
+		return directionalBoundary(english[target], direction)
+	}
+	german := map[string][2]string{
+		"heading":        {"Keine weitere Überschrift", "Keine vorherige Überschrift"},
+		"table":          {"Keine weitere Tabelle", "Keine vorherige Tabelle"},
+		"link":           {"Kein weiterer Link", "Kein vorheriger Link"},
+		"visitedLink":    {"Kein weiterer besuchter Link", "Kein vorheriger besuchter Link"},
+		"unvisitedLink":  {"Kein weiterer unbesuchter Link", "Kein vorheriger unbesuchter Link"},
+		"formField":      {"Kein weiteres Formularfeld", "Kein vorheriges Formularfeld"},
+		"list":           {"Keine weitere Liste", "Keine vorherige Liste"},
+		"listItem":       {"Kein weiterer Listeneintrag", "Kein vorheriger Listeneintrag"},
+		"button":         {"Kein weiterer Schalter", "Kein vorheriger Schalter"},
+		"edit":           {"Kein weiteres Eingabefeld", "Kein vorheriges Eingabefeld"},
+		"frame":          {"Kein weiterer Rahmen", "Kein weiterer Rahmen"},
+		"separator":      {"Keine weitere Trennlinie", "Keine vorherige Trennlinie"},
+		"radioButton":    {"Kein weiterer Auswahlschalter", "Kein vorheriger Auswahlschalter"},
+		"comboBox":       {"Kein weiteres Kombinationsfeld", "Kein vorheriges Kombinationsfeld"},
+		"checkBox":       {"Kein weiteres Kontrollfeld", "Kein vorheriges Kontrollfeld"},
+		"graphic":        {"Keine weitere Grafik", "Keine vorherige Grafik"},
+		"blockQuote":     {"Kein weiterer Zitatblock", "Kein vorheriger Zitatblock"},
+		"notLinkBlock":   {"Kein weiterer Text nach dem Abschnitt der Links", "Kein weiterer Text vor dem Abschnitt der Links"},
+		"landmark":       {"Keine weitere Sprungmarke", "Keine vorherige Sprungmarke"},
+		"embeddedObject": {"Kein weiteres eingebettetes Objekt", "Kein vorheriges eingebettetes Objekt"},
+		"annotation":     {"Keine weitere Anmerkung", "Keine vorherige Anmerkung"},
+		"error":          {"Kein weiterer Fehler", "Kein vorheriger Fehler"},
+		"textParagraph":  {"Keine weiteren Absätze", "kein vorheriger Textabsatz"},
+	}
+	return directionalBoundary(german[target], direction)
+}
+
+func directionalBoundary(values [2]string, direction int) string {
+	if direction < 0 {
+		return values[1]
+	}
+	return values[0]
 }
 
 func (p *Presenter) Mode(mode string) Presentation {
