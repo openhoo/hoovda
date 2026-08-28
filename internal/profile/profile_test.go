@@ -211,6 +211,9 @@ func TestChromiumInternalFrameMatchesFrameNavigation(t *testing.T) {
 	if got := english.Present(node, "quickNavigation"); got.Speech != "Shipping help  frame" || got.Braille != "Shipping help frm" {
 		t.Fatalf("internal frame presentation = %#v", got)
 	}
+	if MatchTarget("frame")(&model.Node{Role: "document frame"}) {
+		t.Fatal("nested frame document must not duplicate its internal-frame container")
+	}
 }
 
 func TestEnglishLandmarkPresentationUsesSemanticRole(t *testing.T) {
