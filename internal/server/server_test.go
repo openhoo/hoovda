@@ -48,6 +48,21 @@ type failedCommandInjector struct {
 	sessionID string
 }
 
+type delayedFocusInjector struct {
+	store     *events.Store
+	sessionID string
+}
+
+func (i delayedFocusInjector) Press(_ context.Context, _ string) error {
+	i.store.Append(events.Event{Kind: events.KindCommandStarted, SessionID: i.sessionID, CausalCommand: "nextFocusable", Text: "Next focusable element"})
+	i.store.Append(events.Event{Kind: events.KindCommandSettled, SessionID: i.sessionID, CausalCommand: "nextFocusable", Reason: "completed"})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		i.store.Append(events.Event{Kind: events.KindFocus, SessionID: i.sessionID, Text: "Email", Reason: "nativeFocus"})
+	}()
+	return nil
+}
+
 func (i failedCommandInjector) Press(_ context.Context, _ string) error {
 	i.store.Append(events.Event{Kind: events.KindCommandStarted, SessionID: i.sessionID, CausalCommand: "nextHeading", Text: "Next heading"})
 	i.store.Append(events.Event{Kind: events.KindCommandSettled, SessionID: i.sessionID, CausalCommand: "nextHeading", Reason: "context deadline exceeded"})
@@ -161,6 +176,31 @@ func TestActionReturnsGatewayTimeoutWhenCommandSettlesWithFailure(t *testing.T) 
 	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "nextHeading"}, "test-secret")
 	if action.Code != http.StatusGatewayTimeout || !bytes.Contains(action.Body.Bytes(), []byte(`"code":"command_failed"`)) {
 		t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+	}
+}
+
+func TestFocusableActionWaitsForDelayedNativeFocus(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "focus-delay"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	server.injector = delayedFocusInjector{store: server.store, sessionID: session.ID}
+	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "nextFocusable"}, "test-secret")
+	if action.Code != http.StatusOK {
+		t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+	}
+	var result ActionResult
+	if err := json.Unmarshal(action.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	focused := false
+	for _, event := range result.Events {
+		focused = focused || event.Kind == events.KindFocus
+	}
+	if !focused {
+		t.Fatalf("delayed native focus missing from result: %#v", result.Events)
 	}
 }
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openhoo.github.io/hoovda/oracle/manifest.schema.json",
-  "title": "HooVDA black-box oracle manifest",
+  "title": "HooVDA behavior-compatibility oracle manifest",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "profile", "status", "oracle", "cases"],

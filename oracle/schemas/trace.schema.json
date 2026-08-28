@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openhoo.github.io/hoovda/oracle/trace.schema.json",
-  "title": "HooVDA NVDA black-box trace",
+  "title": "HooVDA NVDA behavior-compatibility trace",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "caseId", "source", "profile", "locale", "keyboardLayout", "steps"],

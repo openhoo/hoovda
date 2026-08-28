@@ -148,7 +148,7 @@ ENV PATH=/opt/hoovda-runtime/bin:$PATH \
     XDG_DATA_DIRS=/opt/hoovda-runtime/share:/usr/local/share:/usr/share
 
 LABEL org.opencontainers.image.title="HooVDA" \
-      org.opencontainers.image.description="Clean-room Linux-native browser screenreader test engine" \
+      org.opencontainers.image.description="Independent Linux-native browser screenreader test engine" \
       org.opencontainers.image.source="https://github.com/openhoo/hoovda" \
       org.opencontainers.image.licenses="Apache-2.0 AND GPL-3.0-or-later AND LGPL-2.1-or-later" \
       dev.openhoo.hoovda.corresponding-source="/usr/src/hoovda-third-party" \

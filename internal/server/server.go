@@ -230,7 +230,11 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	startedSequence := before
 	for _, event := range observed {
+		if event.Kind == events.KindCommandStarted && event.CausalCommand == command.ID {
+			startedSequence = event.Sequence
+		}
 		if event.Kind != events.KindCommandSettled || event.CausalCommand != command.ID || event.Reason == "completed" {
 			continue
 		}
@@ -241,6 +245,19 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "command_failed", fmt.Errorf("command %q failed: %s", command.ID, event.Reason))
 		return
 	}
+	if commandNeedsNativeFocus(command.ID) {
+		_, _, focused, err := s.store.WaitFor(ctx, startedSequence, session.ID, func(event events.Event) bool {
+			return event.Kind == events.KindFocus
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "event_cursor", err)
+			return
+		}
+		if !focused {
+			writeError(w, http.StatusGatewayTimeout, "focus_not_observed", fmt.Errorf("physical gesture %q completed command %q but no native focus event arrived before %s", gestures[0], command.ID, s.cfg.ActionTimeout))
+			return
+		}
+	}
 	cancel()
 	tailCtx, cancelTail := context.WithTimeout(r.Context(), max(2*s.cfg.QuietWindow, time.Second))
 	defer cancelTail()
@@ -250,6 +267,15 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ActionResult{Command: command.ID, Gesture: gestures[0], Delivery: delivery, BeforeSequence: before, Cursor: cursor, TimedOut: timedOut, Events: resultEvents, State: s.engine.State()})
+}
+
+func commandNeedsNativeFocus(commandID string) bool {
+	switch commandID {
+	case "nextFocusable", "previousFocusable", "returnToPage":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) sessionEvents(w http.ResponseWriter, r *http.Request) {
