@@ -142,6 +142,28 @@ func (p *Presenter) PresentTextParagraph(node *model.Node) Presentation {
 	return p.plain(normalizeTextParagraphSpeech(text), text, node, "quickNavigation")
 }
 
+// PresentTextError reports the text range with NVDA's formatting marker before
+// its content. Braille retains the range text because error-marker braille is
+// controlled by a separate NVDA document-formatting preference.
+func (p *Presenter) PresentTextError(node *model.Node) Presentation {
+	if node == nil {
+		return Presentation{}
+	}
+	marker := "spelling error"
+	if textErrorKind(node) == "grammar" {
+		marker = "grammar error"
+	}
+	if p.locale == "de-DE" {
+		if textErrorKind(node) == "grammar" {
+			marker = "Grammatikfehler"
+		} else {
+			marker = "Rechtschreibfehler"
+		}
+	}
+	text := strings.TrimSpace(node.SpokenContent())
+	return p.plain(joinSpeech(marker, text), text, node, "quickNavigation")
+}
+
 func normalizeTextParagraphSpeech(text string) string {
 	// NVDA's default English symbol level suppresses quotation/bracket symbols
 	// while preserving their speech-command boundaries. These replacements

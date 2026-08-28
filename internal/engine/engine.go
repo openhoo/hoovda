@@ -420,6 +420,8 @@ func (e *Engine) navigate(command profile.Command) error {
 	switch command.Target {
 	case "textParagraph":
 		presentation = e.presenter.PresentTextParagraph(node)
+	case "error":
+		presentation = e.presenter.PresentTextError(node)
 	case "table":
 		presentation = e.presenter.PresentTableEntry(table, tableCell)
 	}

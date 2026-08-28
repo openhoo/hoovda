@@ -159,6 +159,49 @@ func TestQuickNavigationCommandCatalogHasPinnedBoundaries(t *testing.T) {
 	}
 }
 
+func TestTextErrorsUseExplicitLeafTextAttributes(t *testing.T) {
+	for _, kind := range []string{"spelling", "grammar"} {
+		node := &model.Node{
+			Role: "static",
+			Text: kind,
+			TextAttributeRuns: []model.TextAttributeRun{{
+				Start:      0,
+				End:        len(kind),
+				Attributes: map[string]string{"invalid": kind},
+			}},
+		}
+		if !MatchTarget("error")(node) {
+			t.Errorf("explicit %s text attribute was not matched", kind)
+		}
+	}
+	parent := &model.Node{
+		Role:     "section",
+		Children: []model.ObjectID{{Bus: "app", Path: "/text"}},
+		Attributes: map[string]string{
+			"invalid": "spelling",
+		},
+	}
+	if MatchTarget("error")(parent) {
+		t.Fatal("text-error wrapper must not duplicate its leaf range")
+	}
+	if MatchTarget("error")(&model.Node{Role: "entry", States: map[string]bool{"invalid": true}}) {
+		t.Fatal("generic invalid state must not be treated as a text error")
+	}
+}
+
+func TestTextErrorPresentationUsesPinnedNVDAMarkers(t *testing.T) {
+	english, _ := NewPresenter("en-US")
+	spelling := &model.Node{Role: "static", Text: "caat", Attributes: map[string]string{"invalid": "spelling"}}
+	if got := english.PresentTextError(spelling); got.Speech != "spelling error  caat" || got.Braille != "caat" {
+		t.Fatalf("English spelling presentation = %#v", got)
+	}
+	german, _ := NewPresenter("de-DE")
+	grammar := &model.Node{Role: "static", Text: "a dog", Attributes: map[string]string{"invalid": "grammar"}}
+	if got := german.PresentTextError(grammar); got.Speech != "Grammatikfehler  a dog" || got.Braille != "a dog" {
+		t.Fatalf("German grammar presentation = %#v", got)
+	}
+}
+
 func TestEnglishLandmarkPresentationUsesSemanticRole(t *testing.T) {
 	presenter, _ := NewPresenter("en-US")
 	got := presenter.Present(&model.Node{Role: "landmark", Attributes: map[string]string{"xml-roles": "main"}, States: map[string]bool{"enabled": true}}, "quickNavigation")

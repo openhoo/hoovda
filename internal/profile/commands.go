@@ -87,8 +87,8 @@ var commands = []Command{
 	quick("previousEmbeddedObject", "Previous embedded object", "shift+o", "embeddedObject", -1),
 	quick("nextAnnotation", "Next annotation", "a", "annotation", 1),
 	quick("previousAnnotation", "Previous annotation", "shift+a", "annotation", -1),
-	quick("nextSpellingError", "Next spelling error", "w", "error", 1),
-	quick("previousSpellingError", "Previous spelling error", "shift+w", "error", -1),
+	quick("nextSpellingError", "Next spelling or grammar error", "w", "error", 1),
+	quick("previousSpellingError", "Previous spelling or grammar error", "shift+w", "error", -1),
 	quick("nextNotLinkBlock", "Next text after block of links", "n", "notLinkBlock", 1),
 	quick("previousNotLinkBlock", "Previous text after block of links", "shift+n", "notLinkBlock", -1),
 	{ID: "nextCharacter", Label: "Next character", Desktop: []string{"right"}, Laptop: []string{"right"}, Category: "text", Direction: 1, ConsumesBrowse: true},
@@ -242,12 +242,50 @@ func MatchTarget(target string) func(*model.Node) bool {
 		case "annotation":
 			return role == "annotation" || node.Attributes["xml-roles"] == "comment"
 		case "error":
-			return node.Attributes["invalid"] == "spelling" || node.Attributes["text-spelling"] == "misspelled"
+			return len(node.Children) == 0 && textErrorKind(node) != ""
 		case "notLinkBlock":
 			return role == "paragraph" && node.SpokenContent() != ""
 		default:
 			return false
 		}
+	}
+}
+
+func textErrorKind(node *model.Node) string {
+	if kind := normalizedTextErrorKind(node.Attributes["invalid"]); kind != "" {
+		return kind
+	}
+	if strings.EqualFold(node.Attributes["text-spelling"], "misspelled") {
+		return "spelling"
+	}
+	for _, run := range node.TextAttributeRuns {
+		for name, value := range run.Attributes {
+			name = strings.ToLower(strings.TrimSpace(name))
+			value = strings.ToLower(strings.TrimSpace(value))
+			if name == "invalid" {
+				if kind := normalizedTextErrorKind(value); kind != "" {
+					return kind
+				}
+			}
+			if strings.Contains(name, "spelling") && value != "" && value != "false" && value != "none" {
+				return "spelling"
+			}
+			if strings.Contains(name, "grammar") && value != "" && value != "false" && value != "none" {
+				return "grammar"
+			}
+		}
+	}
+	return ""
+}
+
+func normalizedTextErrorKind(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "spelling":
+		return "spelling"
+	case "grammar":
+		return "grammar"
+	default:
+		return ""
 	}
 }
 

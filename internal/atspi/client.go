@@ -427,6 +427,9 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 		var text string
 		if err := object.CallWithContext(ctx, InterfaceText+".GetText", 0, int32(0), int32(-1)).Store(&text); err == nil {
 			node.Text = text
+			if characterCount, countErr := int32Property(object, InterfaceText+".CharacterCount"); countErr == nil && characterCount > 0 {
+				node.TextAttributeRuns = readTextAttributeRuns(ctx, object, characterCount)
+			}
 		}
 	}
 	if slicesContains(interfaces, InterfaceComponent) {
@@ -507,6 +510,27 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 		node.SetSize, _ = strconv.Atoi(value)
 	}
 	return node, nil
+}
+
+func readTextAttributeRuns(ctx context.Context, object dbus.BusObject, characterCount int32) []model.TextAttributeRun {
+	const maxRuns = 10_000
+	runs := make([]model.TextAttributeRun, 0)
+	for offset, count := int32(0), 0; offset < characterCount && count < maxRuns; count++ {
+		attributes := make(map[string]string)
+		var start, end int32
+		err := object.CallWithContext(ctx, InterfaceText+".GetAttributeRun", 0, offset, false).Store(&attributes, &start, &end)
+		if err != nil || end <= offset || start < 0 {
+			break
+		}
+		if end > characterCount {
+			end = characterCount
+		}
+		if len(attributes) > 0 {
+			runs = append(runs, model.TextAttributeRun{Start: int(start), End: int(end), Attributes: attributes})
+		}
+		offset = end
+	}
+	return runs
 }
 
 func resolveGraphContext(graph *model.Graph) {
