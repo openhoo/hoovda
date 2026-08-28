@@ -364,7 +364,7 @@ func (p *Presenter) brailleRole(node *model.Node) string {
 			"entry": "ef", "password text": "kennw ef", "link": "lnk",
 			"list": "lst", "list item": "lste", "image": "grf", "graphic": "grf", "table": "tbl",
 			"table cell": "z", "cell": "z", "column header": "spü", "row header": "zü",
-			"document web": "dok", "document frame": "rahm", "frame": "rahm",
+			"document web": "dok", "document frame": "rahm", "internal frame": "rahm", "frame": "rahm",
 			"dialog": "dlg", "menu": "mnü", "menu item": "mnüe", "progress bar": "fsb",
 		}
 		if value := roles[role]; value != "" {
@@ -378,7 +378,7 @@ func (p *Presenter) brailleRole(node *model.Node) string {
 		"entry": "edt", "password text": "pwd edt", "link": "lnk",
 		"list": "lst", "list item": "lst item", "table": "tbl",
 		"table cell": "cell", "column header": "ch", "row header": "rh",
-		"document web": "doc", "document frame": "frm", "frame": "frm",
+		"document web": "doc", "document frame": "frm", "internal frame": "frm", "frame": "frm",
 		"progress bar": "prgbar", "page tab": "tab",
 	}
 	if value := roles[role]; value != "" {
@@ -598,7 +598,7 @@ func (p *Presenter) role(role string) string {
 	english := map[string]string{
 		"push button": "button", "toggle button": "toggle button", "check box": "check box",
 		"radio button": "radio button", "combo box": "combo box", "password text": "password edit",
-		"document web": "document", "document frame": "frame", "table cell": "cell",
+		"document web": "document", "document frame": "frame", "internal frame": "frame", "table cell": "cell",
 		"column header": "column header", "row header": "row header", "page tab": "tab",
 		"status bar": "status", "progress bar": "progress bar", "list item": "list item",
 	}
@@ -614,7 +614,7 @@ func (p *Presenter) role(role string) string {
 		"combo box": "Kombinationsfeld", "entry": "Eingabefeld", "password text": "Passworteingabefeld",
 		"link": "Link", "list": "Liste", "list item": "Listeneintrag", "table": "Tabelle",
 		"table cell": "Zelle", "cell": "Zelle", "column header": "Spaltenbeschriftung",
-		"row header": "Zeilenbeschriftung", "document web": "Dokument", "document frame": "Rahmen",
+		"row header": "Zeilenbeschriftung", "document web": "Dokument", "document frame": "Rahmen", "internal frame": "Rahmen",
 		"landmark": "Sprungmarke", "dialog": "Dialogfeld", "alert": "Benachrichtigung", "status bar": "Status",
 		"menu": "Menü", "menu item": "Menü-Eintrag", "page tab": "Tab", "tree item": "Eintrag",
 		"slider": "Schieber", "progress bar": "Fortschrittsbalken", "image": "Grafik", "graphic": "Grafik",

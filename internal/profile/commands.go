@@ -232,7 +232,7 @@ func MatchTarget(target string) func(*model.Node) bool {
 		case "textParagraph":
 			return (role == "paragraph" || node.Attributes["tag"] == "p") && matchesTextParagraph(node.SpokenContent())
 		case "frame":
-			return role == "frame" || role == "document frame"
+			return role == "frame" || role == "document frame" || role == "internal frame"
 		case "separator":
 			return role == "separator"
 		case "blockQuote":

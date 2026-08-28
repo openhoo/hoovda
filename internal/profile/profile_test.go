@@ -202,6 +202,17 @@ func TestTextErrorPresentationUsesPinnedNVDAMarkers(t *testing.T) {
 	}
 }
 
+func TestChromiumInternalFrameMatchesFrameNavigation(t *testing.T) {
+	node := &model.Node{Role: "internal frame", Name: "Shipping help", States: map[string]bool{"enabled": true}}
+	if !MatchTarget("frame")(node) {
+		t.Fatal("Chromium internal frame was not matched")
+	}
+	english, _ := NewPresenter("en-US")
+	if got := english.Present(node, "quickNavigation"); got.Speech != "Shipping help  frame" || got.Braille != "Shipping help frm" {
+		t.Fatalf("internal frame presentation = %#v", got)
+	}
+}
+
 func TestEnglishLandmarkPresentationUsesSemanticRole(t *testing.T) {
 	presenter, _ := NewPresenter("en-US")
 	got := presenter.Present(&model.Node{Role: "landmark", Attributes: map[string]string{"xml-roles": "main"}, States: map[string]bool{"enabled": true}}, "quickNavigation")
