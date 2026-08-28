@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 2,
+  "caseId": "nvda-aria-details-en-us-desktop",
+  "source": "HooVDA",
+  "profile": "nvda-web-2026.1.1",
+  "locale": "en-US",
+  "keyboardLayout": "desktop",
+  "steps": [
+    {
+      "command": "nextFocusable",
+      "speech": ["push me  button  has details"],
+      "braille": ["push me btn details"],
+      "mode": "focus",
+      "raw": {
+        "capture": "linux-container-chromium-at-spi",
+        "setup": ["focus first button", "clear captured output"],
+        "gesture": "tab"
+      }
+    },
+    {
+      "command": "reportDetails",
+      "speech": ["Press to self-destruct"],
+      "braille": ["Press to self-destruct"],
+      "mode": "focus",
+      "raw": {
+        "capture": "linux-container-chromium-at-spi",
+        "gesture": "insert+d"
+      }
+    }
+  ]
+}

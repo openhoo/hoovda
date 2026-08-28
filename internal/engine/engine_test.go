@@ -65,15 +65,81 @@ func TestQuickNavigationProducesSpeechAndBraille(t *testing.T) {
 	}
 	foundSpeech, foundBraille := false, false
 	for _, event := range got {
-		if event.Kind == events.KindSpeech && event.Text == "Checkout heading level 1" {
+		if event.Kind == events.KindSpeech && event.Text == "Checkout  heading  level 1" {
 			foundSpeech = true
 		}
-		if event.Kind == events.KindBraille {
+		if event.Kind == events.KindBraille && event.Text == "Checkout h1" {
 			foundBraille = true
 		}
 	}
 	if !foundSpeech || !foundBraille {
 		t.Fatalf("events = %#v", got)
+	}
+}
+
+func TestStructuredFindAndElementsList(t *testing.T) {
+	engine, store := fixtureEngine(t)
+	before := store.Cursor()
+	if err := engine.ExecuteDirectWithArgument(context.Background(), "find", "checkout"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "Checkout  heading  level 1" {
+		t.Fatalf("find speech = %q", speech)
+	}
+	before = store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "findNext"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "no next text checkout" {
+		t.Fatalf("find-next speech = %q", speech)
+	}
+	before = store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "elementsList"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "Elements list  0 links  1 headings  1 form fields  1 buttons  0 landmarks" {
+		t.Fatalf("elements-list speech = %q", speech)
+	}
+}
+
+func TestFindSkipsDuplicateDescendantForSameTextOccurrence(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	item := model.ObjectID{Bus: "app", Path: "/item"}
+	textNode := model.ObjectID{Bus: "app", Path: "/item/text"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:     {ID: root, Role: "document web", Children: []model.ObjectID{item}},
+		item:     {ID: item, Parent: root, Role: "list item", Text: "• Accessibility toolkit", Children: []model.ObjectID{textNode}},
+		textNode: {ID: textNode, Parent: item, Role: "static", Text: "Accessibility toolkit"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, store := engineForGraph(t, graph)
+	if err := engine.ExecuteDirectWithArgument(context.Background(), "find", "Accessibility toolkit"); err != nil {
+		t.Fatal(err)
+	}
+	before := store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "findNext"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "no next text Accessibility toolkit" {
+		t.Fatalf("find-next speech = %q", speech)
+	}
+}
+
+func TestReportDetailsUsesRelationTargetOnDemand(t *testing.T) {
+	engine, store := fixtureEngine(t)
+	engine.mu.Lock()
+	button := engine.graph.Nodes[model.ObjectID{Bus: "app", Path: "/button"}]
+	button.RelationText = map[string][]string{"details": {"Payment continues after review"}}
+	engine.cursor.Object = button.ID
+	engine.mu.Unlock()
+	before := store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "reportDetails"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "Payment continues after review" {
+		t.Fatalf("details speech = %q", speech)
 	}
 }
 
@@ -208,7 +274,7 @@ func TestTableNavigationUsesSpansAndFirstLastCommands(t *testing.T) {
 	if got := engine.State().Cursor.Object; got != last {
 		t.Fatalf("span-aware next column cursor = %#v", got)
 	}
-	if speech := speechAfter(t, store, before); speech != "Last cell row 2 column 3" {
+	if speech := speechAfter(t, store, before); speech != "row 2  column 3  Last" {
 		t.Fatalf("next column speech = %q", speech)
 	}
 	if err := engine.ExecuteDirect(context.Background(), "firstTableColumn"); err != nil {
@@ -278,8 +344,125 @@ func TestFocusPresentationUsesResolvedGraphRelations(t *testing.T) {
 	if !engine.State().WebContentFocused {
 		t.Fatal("focus in web document was not recognized")
 	}
-	if speech := speechAfter(t, store, before); speech != "Email entry Work address" {
+	if speech := speechAfter(t, store, before); speech != "Email  entry  Work address" {
 		t.Fatalf("focus speech = %q", speech)
+	}
+	if mode := engine.State().Cursor.Mode; mode != "focus" {
+		t.Fatalf("cursor mode = %q", mode)
+	}
+}
+
+func TestFocusModeReturnsToBrowseForNonWidgetFocus(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	entry := model.ObjectID{Bus: "app", Path: "/entry"}
+	button := model.ObjectID{Bus: "app", Path: "/button"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:   {ID: root, Role: "document web", Children: []model.ObjectID{entry, button}},
+		entry:  {ID: entry, Parent: root, Role: "entry", Name: "Email", States: map[string]bool{"focusable": true, "editable": true}},
+		button: {ID: button, Parent: root, Role: "push button", Name: "Continue", States: map[string]bool{"focusable": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, _ := engineForGraph(t, graph)
+	engine.handleFocus(context.Background(), entry)
+	if mode := engine.State().Cursor.Mode; mode != "focus" {
+		t.Fatalf("entry mode = %q", mode)
+	}
+	engine.handleFocus(context.Background(), button)
+	state := engine.State()
+	if state.Cursor.Mode != "browse" || !state.CursorInDocument {
+		t.Fatalf("button state = %#v", state)
+	}
+}
+
+func TestBrowserChromeFocusPreservesVirtualBufferCursor(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	document := model.ObjectID{Bus: "app", Path: "/document"}
+	tab := model.ObjectID{Bus: "app", Path: "/tab"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:     {ID: root, Role: "application", Children: []model.ObjectID{document, tab}},
+		document: {ID: document, Parent: root, Role: "document web", Name: "Checkout"},
+		tab:      {ID: tab, Parent: root, Role: "page tab", Name: "Checkout", States: map[string]bool{"focusable": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, _ := engineForGraph(t, graph)
+	engine.mu.Lock()
+	engine.cursor.Object = document
+	engine.mu.Unlock()
+	engine.handleFocus(context.Background(), tab)
+	state := engine.State()
+	if state.Cursor.Object != document || state.Cursor.Mode != "browse" || !state.CursorInDocument || state.WebContentFocused {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestApplicationAncestorEnablesAutomaticFocusMode(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	application := model.ObjectID{Bus: "app", Path: "/application"}
+	button := model.ObjectID{Bus: "app", Path: "/button"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:        {ID: root, Role: "document web", Children: []model.ObjectID{application}},
+		application: {ID: application, Parent: root, Role: "application", Children: []model.ObjectID{button}},
+		button:      {ID: button, Parent: application, Role: "push button", Name: "push me", States: map[string]bool{"enabled": true, "focusable": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, store := engineForGraph(t, graph)
+	before := store.Cursor()
+	engine.handleFocus(context.Background(), button)
+	if mode := engine.State().Cursor.Mode; mode != "focus" {
+		t.Fatalf("cursor mode = %q", mode)
+	}
+	items, _, err := store.Snapshot(before, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range items {
+		if item.Kind == events.KindMode && item.Mode == "focus" && item.Reason == "automaticFocusMode" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("events = %#v", items)
+	}
+}
+
+func TestFocusRefreshesGraphForUnknownObject(t *testing.T) {
+	oldRoot := model.ObjectID{Bus: "app", Path: "/old-root"}
+	oldGraph, err := model.NewGraph(oldRoot, map[model.ObjectID]*model.Node{
+		oldRoot: {ID: oldRoot, Role: "document web", Name: "Old document"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRoot := model.ObjectID{Bus: "app", Path: "/new-root"}
+	application := model.ObjectID{Bus: "app", Path: "/application"}
+	button := model.ObjectID{Bus: "app", Path: "/button"}
+	newGraph, err := model.NewGraph(newRoot, map[model.ObjectID]*model.Node{
+		newRoot:     {ID: newRoot, Role: "document web", Children: []model.ObjectID{application}},
+		application: {ID: application, Parent: newRoot, Role: "application", Children: []model.ObjectID{button}},
+		button:      {ID: button, Parent: application, Role: "push button", Name: "push me", States: map[string]bool{"focusable": true}},
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := &fakeAccess{graph: oldGraph, events: make(chan NativeEvent, 1)}
+	store := events.NewStore(100)
+	presenter, _ := profile.NewPresenter("en-US")
+	engine := New(access, store, presenter, braille.Passthrough{}, synth.Silence{SampleRate: 22050}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Config{Locale: "en-US", KeyboardLayout: "desktop"})
+	if err := engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	access.graph = newGraph
+	engine.handleFocus(context.Background(), button)
+	state := engine.State()
+	if !state.WebContentFocused || state.Cursor.Mode != "focus" || state.GraphRevision != 2 {
+		t.Fatalf("state = %#v", state)
 	}
 }
 
@@ -397,7 +580,7 @@ func TestDocumentFocusRefreshesNavigationGraph(t *testing.T) {
 	}
 	found := false
 	for _, event := range got {
-		if event.Kind == events.KindSpeech && event.CausalCommand == "nextHeading" && event.Text == "Checkout heading level 1" {
+		if event.Kind == events.KindSpeech && event.CausalCommand == "nextHeading" && event.Text == "Checkout  heading  level 1" {
 			found = true
 		}
 	}

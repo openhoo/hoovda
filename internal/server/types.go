@@ -37,12 +37,14 @@ type Session struct {
 }
 
 type ActionRequest struct {
-	Command string `json:"command"`
+	Command  string  `json:"command"`
+	Argument *string `json:"argument,omitempty"`
 }
 
 type ActionResult struct {
 	Command        string         `json:"command"`
 	Gesture        string         `json:"gesture"`
+	Delivery       string         `json:"delivery"`
 	BeforeSequence uint64         `json:"beforeSequence"`
 	Cursor         uint64         `json:"cursor"`
 	TimedOut       bool           `json:"timedOut"`

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/openhoo/hoovda/internal/braille"
 	"github.com/openhoo/hoovda/internal/events"
@@ -48,6 +50,7 @@ type State struct {
 	Ready                  bool           `json:"ready"`
 	GraphRevision          uint64         `json:"graphRevision"`
 	Cursor                 model.Cursor   `json:"cursor"`
+	CursorInDocument       bool           `json:"cursorInDocument"`
 	Focus                  model.ObjectID `json:"focus"`
 	BrowserWindowActive    bool           `json:"browserWindowActive"`
 	WebContentFocused      bool           `json:"webContentFocused"`
@@ -76,6 +79,7 @@ type Engine struct {
 	webContentFocused   bool
 	singleLetter        bool
 	activeSession       string
+	findQuery           string
 	synthCancel         context.CancelFunc
 	synthDone           <-chan struct{}
 }
@@ -268,10 +272,12 @@ func (e *Engine) State() State {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	revision := uint64(0)
+	cursorInDocument := false
 	if e.graph != nil {
 		revision = e.graph.Revision
+		_, cursorInDocument = e.graph.DocumentRoot(e.cursor.Object)
 	}
-	return State{Ready: e.ready, GraphRevision: revision, Cursor: e.cursor, Focus: e.focus, BrowserWindowActive: e.browserWindowActive, WebContentFocused: e.webContentFocused, SingleLetterNavigation: e.singleLetter, LastSequence: e.store.Cursor()}
+	return State{Ready: e.ready, GraphRevision: revision, Cursor: e.cursor, CursorInDocument: cursorInDocument, Focus: e.focus, BrowserWindowActive: e.browserWindowActive, WebContentFocused: e.webContentFocused, SingleLetterNavigation: e.singleLetter, LastSequence: e.store.Cursor()}
 }
 
 func (e *Engine) DocumentSnapshot() []model.Node {
@@ -292,7 +298,7 @@ func (e *Engine) HandleGesture(ctx context.Context, gesture string) (bool, error
 	if !ok {
 		return false, nil
 	}
-	consume, err := e.execute(ctx, command)
+	consume, err := e.execute(ctx, command, "")
 	return consume, err
 }
 
@@ -301,11 +307,20 @@ func (e *Engine) ExecuteDirect(ctx context.Context, commandID string) error {
 	if !ok {
 		return fmt.Errorf("unsupported command %q", commandID)
 	}
-	_, err := e.execute(ctx, command)
+	_, err := e.execute(ctx, command, "")
 	return err
 }
 
-func (e *Engine) execute(ctx context.Context, command profile.Command) (bool, error) {
+func (e *Engine) ExecuteDirectWithArgument(ctx context.Context, commandID, argument string) error {
+	command, ok := profile.CommandByID(commandID)
+	if !ok {
+		return fmt.Errorf("unsupported command %q", commandID)
+	}
+	_, err := e.execute(ctx, command, argument)
+	return err
+}
+
+func (e *Engine) execute(ctx context.Context, command profile.Command, argument string) (bool, error) {
 	e.mu.RLock()
 	sessionID := e.activeSession
 	mode := e.cursor.Mode
@@ -341,7 +356,7 @@ func (e *Engine) execute(ctx context.Context, command profile.Command) (bool, er
 	case "table":
 		err = e.navigateTable(command)
 	case "dialog":
-		err = e.reportUnavailable(command)
+		err = e.dialog(command, argument)
 	case "focus":
 		consume = false
 	}
@@ -355,7 +370,7 @@ func (e *Engine) execute(ctx context.Context, command profile.Command) (bool, er
 
 func commandNeedsGraph(command profile.Command) bool {
 	switch command.Category {
-	case "quickNavigation", "text", "activation", "report", "table":
+	case "quickNavigation", "text", "activation", "report", "table", "dialog":
 		return true
 	default:
 		return false
@@ -715,6 +730,10 @@ func (e *Engine) report(command profile.Command) error {
 	if node == nil {
 		return errors.New("cursor node is unavailable")
 	}
+	if command.ID == "reportDetails" {
+		e.emit(e.presenter.Details(node.RelationText["details"]), node, command.ID, "reportDetails", "normal")
+		return nil
+	}
 	if command.ID != "sayAll" {
 		e.emit(e.presenter.Present(node, "report"), node, command.ID, "report", "normal")
 		return nil
@@ -750,10 +769,136 @@ func (e *Engine) report(command profile.Command) error {
 	return nil
 }
 
-func (e *Engine) reportUnavailable(command profile.Command) error {
-	text := command.Label + " is not available in this build"
-	e.emit(profile.Presentation{Speech: text, Braille: text}, nil, command.ID, "unsupported", "normal")
-	return errors.New(text)
+func (e *Engine) dialog(command profile.Command, argument string) error {
+	switch command.ID {
+	case "elementsList":
+		return e.reportElementsList(command.ID)
+	case "find":
+		query := strings.TrimSpace(argument)
+		if query == "" {
+			return errors.New("find requires a non-empty query through the structured action API")
+		}
+		e.mu.Lock()
+		e.findQuery = query
+		e.mu.Unlock()
+		return e.find(command.ID, query, 1)
+	case "findNext", "findPrevious":
+		e.mu.RLock()
+		query := e.findQuery
+		e.mu.RUnlock()
+		if query == "" {
+			return errors.New("no previous find query")
+		}
+		direction := 1
+		if command.ID == "findPrevious" {
+			direction = -1
+		}
+		return e.find(command.ID, query, direction)
+	default:
+		return fmt.Errorf("unsupported dialog command %q", command.ID)
+	}
+}
+
+func (e *Engine) find(commandID, query string, direction int) error {
+	e.mu.Lock()
+	graph, current := e.graph, e.cursor.Object
+	if graph == nil {
+		e.mu.Unlock()
+		return errors.New("accessible graph is unavailable")
+	}
+	document, scoped := graph.DocumentRoot(current)
+	start := graph.Index(current)
+	queryFold := strings.ToLower(query)
+	var match *model.Node
+	for index := start + direction; index >= 0 && index < len(graph.Order); index += direction {
+		node := graph.Nodes[graph.Order[index]]
+		if node == nil || (scoped && !graph.InDocument(node.ID, document)) {
+			continue
+		}
+		haystack := strings.Join([]string{node.SpokenContent(), node.Description, node.Text}, " ")
+		if strings.Contains(strings.ToLower(haystack), queryFold) {
+			if sameFindOccurrence(graph, current, node, queryFold) {
+				continue
+			}
+			match = node
+			e.cursor.Object, e.cursor.Offset = node.ID, 0
+			break
+		}
+	}
+	e.mu.Unlock()
+	if match == nil {
+		e.emit(e.presenter.NoTarget("text "+query, direction), nil, commandID, "navigationBoundary", "normal")
+		return nil
+	}
+	e.emit(e.presenter.Present(match, "textNavigation"), match, commandID, "find", "normal")
+	return nil
+}
+
+func sameFindOccurrence(graph *model.Graph, current model.ObjectID, candidate *model.Node, queryFold string) bool {
+	if graph == nil || candidate == nil || current == candidate.ID {
+		return current == candidate.ID
+	}
+	currentNode := graph.Nodes[current]
+	if currentNode == nil || (!isGraphAncestor(graph, current, candidate.ID) && !isGraphAncestor(graph, candidate.ID, current)) {
+		return false
+	}
+	currentText := strings.ToLower(strings.Join([]string{currentNode.SpokenContent(), currentNode.Description, currentNode.Text}, " "))
+	candidateText := strings.ToLower(strings.Join([]string{candidate.SpokenContent(), candidate.Description, candidate.Text}, " "))
+	return strings.Contains(currentText, queryFold) && strings.Contains(candidateText, queryFold) &&
+		normalizeFindOccurrence(currentText) == normalizeFindOccurrence(candidateText)
+}
+
+func normalizeFindOccurrence(value string) string {
+	return strings.Join(strings.FieldsFunc(value, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	}), " ")
+}
+
+func isGraphAncestor(graph *model.Graph, ancestor, descendant model.ObjectID) bool {
+	for id, steps := descendant, 0; graph != nil && id.Valid() && steps < 512; steps++ {
+		node := graph.Nodes[id]
+		if node == nil || !node.Parent.Valid() {
+			return false
+		}
+		if node.Parent == ancestor {
+			return true
+		}
+		id = node.Parent
+	}
+	return false
+}
+
+func (e *Engine) reportElementsList(commandID string) error {
+	e.mu.RLock()
+	graph, current := e.graph, e.cursor.Object
+	e.mu.RUnlock()
+	if graph == nil {
+		return errors.New("accessible graph is unavailable")
+	}
+	document, scoped := graph.DocumentRoot(current)
+	counts := map[string]int{"headings": 0, "links": 0, "form fields": 0, "buttons": 0, "landmarks": 0}
+	for _, id := range graph.Order {
+		if scoped && !graph.InDocument(id, document) {
+			continue
+		}
+		node := graph.Nodes[id]
+		if node == nil {
+			continue
+		}
+		for label, target := range map[string]string{
+			"headings": "heading", "links": "link", "form fields": "formField", "buttons": "button", "landmarks": "landmark",
+		} {
+			if profile.MatchTarget(target)(node) {
+				counts[label]++
+			}
+		}
+	}
+	text := fmt.Sprintf("Elements list  %d links  %d headings  %d form fields  %d buttons  %d landmarks",
+		counts["links"], counts["headings"], counts["form fields"], counts["buttons"], counts["landmarks"])
+	braille := fmt.Sprintf("Elements list %d lnk %d hdg %d form %d btn %d lmk",
+		counts["links"], counts["headings"], counts["form fields"], counts["buttons"], counts["landmarks"])
+	e.emit(profile.Presentation{Speech: text, Braille: braille}, nil, commandID, "elementsList", "normal")
+	return nil
 }
 
 func (e *Engine) emit(presentation profile.Presentation, node *model.Node, command, reason, priority string) {
@@ -778,7 +923,13 @@ func (e *Engine) emitEvidence(presentation profile.Presentation, node *model.Nod
 		e.logger.Error("braille translation failed", "error", err)
 		translation = braille.Result{Text: presentation.Braille, Cells: []byte(presentation.Braille)}
 	}
-	e.store.Append(events.Event{Kind: events.KindBraille, SessionID: sessionID, CausalCommand: command, Source: source, Text: translation.Text, BrailleCells: translation.Cells, BrailleCursor: translation.Cursor, Reason: reason})
+	// NVDA's braille spy exposes the logical braille buffer text separately
+	// from the translated cell array written to a display. Keep the same
+	// boundary: Text is the presenter-authored display line, while
+	// BrailleCells contains the locale-table translation. Publishing the
+	// Liblouis textual rendering here used to make assertions depend on the
+	// lou_translate output format instead of the screen-reader buffer.
+	e.store.Append(events.Event{Kind: events.KindBraille, SessionID: sessionID, CausalCommand: command, Source: source, Text: presentation.Braille, BrailleCells: translation.Cells, BrailleCursor: translation.Cursor, Reason: reason})
 	if synthesize && presentation.Speech != "" {
 		e.startSynthesis(speechEvent, presentation)
 	}
@@ -906,6 +1057,16 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 		e.logger.Debug("read focus object", "error", err)
 		return false
 	}
+	e.mu.RLock()
+	known := e.graph != nil && e.graph.Nodes[id] != nil
+	e.mu.RUnlock()
+	if !known {
+		if err := e.Refresh(ctx); err != nil {
+			e.logger.Debug("refresh graph for new focus object", "error", err)
+		} else if refreshed, err := e.access.ReadNode(ctx, id); err == nil {
+			node = refreshed
+		}
+	}
 	isDocument := node.Role == "document web" || node.Role == "document frame"
 	e.mu.Lock()
 	if e.graph != nil {
@@ -918,16 +1079,50 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	e.focus = id
 	e.browserWindowActive = true
 	e.webContentFocused = isDocument || hasDocumentAncestor(e.graph, id)
+	oldMode := e.cursor.Mode
+	if isDocument || !e.webContentFocused {
+		e.cursor.Mode = "browse"
+	} else if focusModeTarget(e.graph, node) {
+		e.cursor.Mode = "focus"
+	} else {
+		e.cursor.Mode = "browse"
+	}
+	mode, modeChanged := e.cursor.Mode, oldMode != e.cursor.Mode
 	if isDocument {
 		e.graphDirty = true
 	}
-	if isDocument || e.cursor.Mode == "focus" || node.HasState("focusable") {
+	if e.webContentFocused && (isDocument || e.cursor.Mode == "focus" || node.HasState("focusable")) {
 		e.cursor.Object, e.cursor.Offset = id, 0
 	}
 	e.mu.Unlock()
 	e.store.Append(events.Event{Kind: events.KindFocus, SessionID: e.session(), Source: &id, Text: node.Name, Reason: "nativeFocus"})
+	if modeChanged {
+		e.store.Append(events.Event{Kind: events.KindMode, SessionID: e.session(), CausalCommand: "focus", Source: &id, Mode: mode, Reason: "automaticFocusMode"})
+	}
 	e.emit(e.presenter.Present(node, "focus"), node, "focus", "nativeFocus", "normal")
 	return isDocument
+}
+
+func focusModeTarget(graph *model.Graph, node *model.Node) bool {
+	if node == nil {
+		return false
+	}
+	role := strings.ToLower(node.Role)
+	if node.HasState("editable") || slices.Contains([]string{
+		"entry", "password text", "combo box", "list box", "tree", "tree table", "spin button", "slider",
+	}, role) {
+		return true
+	}
+	for id, steps := node.Parent, 0; graph != nil && id.Valid() && steps < 512; id, steps = graph.Nodes[id].Parent, steps+1 {
+		ancestor := graph.Nodes[id]
+		if ancestor == nil {
+			break
+		}
+		if strings.ToLower(ancestor.Role) == "application" || strings.Contains(ancestor.Attributes["xml-roles"], "application") {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneRelationText(source map[string][]string) map[string][]string {

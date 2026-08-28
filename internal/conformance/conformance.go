@@ -13,12 +13,22 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 var requiredTags = []string{
 	"speech", "braille", "focus", "browse-mode", "focus-mode", "quick-navigation",
 	"text-navigation", "forms", "tables", "live-region", "dynamic-content",
 	"browser-chrome", "en-US", "de-DE", "desktop", "laptop",
+}
+
+const (
+	releaseCommit   = "5d92106f17e461dac62aa48257bbbf4183e033d0"
+	captureToolURL  = "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/libraries/SystemTestSpy/speechSpyGlobalPlugin.py"
+	captureToolHash = "1bf6319b2b66896618b34d492b5772846ab55b150613935f4290803945087641"
+)
+
+var officialReferenceHashes = map[string]string{
+	"tests/system/robot/chromeTests.py": "09988fded0f68cbfa115a4f23fff24073c2b33bcc0a7bab5ec97ac43e231b077",
 }
 
 type Manifest struct {
@@ -35,20 +45,34 @@ type Oracle struct {
 	Product         string `json:"product"`
 	Version         string `json:"version"`
 	Platform        string `json:"platform"`
+	ReleaseTag      string `json:"releaseTag"`
+	ReleaseCommit   string `json:"releaseCommit"`
+	CaptureToolURL  string `json:"captureToolUrl"`
 	CaptureToolHash string `json:"captureToolHash"`
+	EvidenceLicense string `json:"evidenceLicense"`
 }
 
 type Case struct {
-	ID             string   `json:"id"`
-	Locale         string   `json:"locale"`
-	KeyboardLayout string   `json:"keyboardLayout"`
-	Fixture        string   `json:"fixture"`
-	FixtureSHA256  string   `json:"fixtureSha256"`
-	Expected       string   `json:"expected"`
-	ExpectedSHA256 string   `json:"expectedSha256"`
-	Observed       string   `json:"observed"`
-	ObservedSHA256 string   `json:"observedSha256"`
-	Tags           []string `json:"tags"`
+	ID             string    `json:"id"`
+	Locale         string    `json:"locale"`
+	KeyboardLayout string    `json:"keyboardLayout"`
+	Fixture        string    `json:"fixture"`
+	FixtureSHA256  string    `json:"fixtureSha256"`
+	Expected       string    `json:"expected"`
+	ExpectedSHA256 string    `json:"expectedSha256"`
+	Observed       string    `json:"observed"`
+	ObservedSHA256 string    `json:"observedSha256"`
+	Reference      Reference `json:"reference"`
+	Tags           []string  `json:"tags"`
+}
+
+type Reference struct {
+	URL       string `json:"url"`
+	Revision  string `json:"revision"`
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	Test      string `json:"test"`
+	Assertion string `json:"assertion"`
 }
 
 type Trace struct {
@@ -100,12 +124,16 @@ func Check(manifestPath string) (Report, error) {
 	if manifest.Oracle.Product != "NVDA" || manifest.Oracle.Version != "2026.1.1" {
 		report.Issues = append(report.Issues, "oracle product and version must be NVDA 2026.1.1")
 	}
-	if manifest.Oracle.Platform == "" || !validDigest(manifest.Oracle.CaptureToolHash) {
-		report.Issues = append(report.Issues, "oracle platform and captureToolHash are required")
+	if manifest.Oracle.Platform == "" || manifest.Oracle.ReleaseTag != "release-2026.1.1" || manifest.Oracle.ReleaseCommit != releaseCommit {
+		report.Issues = append(report.Issues, "oracle platform, releaseTag, and releaseCommit must pin NVDA 2026.1.1")
+	}
+	if manifest.Oracle.CaptureToolURL != captureToolURL || manifest.Oracle.CaptureToolHash != captureToolHash || manifest.Oracle.EvidenceLicense != "GPL-2.0-or-later" {
+		report.Issues = append(report.Issues, "oracle captureToolUrl, captureToolHash, and evidenceLicense are required")
 	}
 	root := filepath.Dir(manifestPath)
 	seenCases := map[string]bool{}
 	seenTags := map[string]bool{}
+	seenMatrices := map[string]bool{}
 	for _, item := range manifest.Cases {
 		if item.ID == "" || seenCases[item.ID] {
 			report.Issues = append(report.Issues, fmt.Sprintf("case id %q is empty or duplicated", item.ID))
@@ -117,6 +145,10 @@ func Check(manifestPath string) (Report, error) {
 		}
 		if item.KeyboardLayout != "desktop" && item.KeyboardLayout != "laptop" {
 			report.Issues = append(report.Issues, item.ID+": invalid keyboardLayout")
+		}
+		seenMatrices[item.Locale+"/"+item.KeyboardLayout] = true
+		if issue := validateReference(item.Reference, manifest.Oracle.ReleaseCommit); issue != "" {
+			report.Issues = append(report.Issues, item.ID+" reference: "+issue)
 		}
 		for _, tag := range item.Tags {
 			seenTags[tag] = true
@@ -145,6 +177,14 @@ func Check(manifestPath string) (Report, error) {
 	for _, tag := range requiredTags {
 		if !seenTags[tag] {
 			report.Issues = append(report.Issues, "required coverage tag missing: "+tag)
+		}
+	}
+	for _, locale := range []string{"en-US", "de-DE"} {
+		for _, layout := range []string{"desktop", "laptop"} {
+			matrix := locale + "/" + layout
+			if !seenMatrices[matrix] {
+				report.Issues = append(report.Issues, "required locale/layout matrix missing: "+matrix)
+			}
 		}
 	}
 	slices.Sort(report.Issues)
@@ -221,10 +261,40 @@ func validateTrace(trace Trace, item Case, profile, source string) string {
 	if len(trace.Steps) == 0 {
 		return "trace has no steps"
 	}
+	hasSpeech, hasBraille := false, false
 	for index, step := range trace.Steps {
 		if strings.TrimSpace(step.Command) == "" {
 			return fmt.Sprintf("step %d has no command", index+1)
 		}
+		if step.Mode != "browse" && step.Mode != "focus" {
+			return fmt.Sprintf("step %d mode must equal browse or focus", index+1)
+		}
+		hasSpeech = hasSpeech || len(step.Speech) > 0
+		hasBraille = hasBraille || len(step.Braille) > 0
+	}
+	if !hasSpeech || !hasBraille {
+		return "trace must contain both speech and braille evidence"
+	}
+	return ""
+}
+
+func validateReference(reference Reference, releaseCommit string) string {
+	wantURL := "https://github.com/nvaccess/nvda/blob/" + releaseCommit + "/" + reference.Path
+	if reference.URL != wantURL {
+		return "url must pin the exact NVDA release commit and source path"
+	}
+	if reference.Revision != releaseCommit || !validRevision(reference.Revision) {
+		return "revision must equal oracle releaseCommit"
+	}
+	if !filepath.IsLocal(reference.Path) || strings.TrimSpace(reference.Path) == "" {
+		return "path must be a non-empty local repository path"
+	}
+	wantHash, known := officialReferenceHashes[reference.Path]
+	if !known || reference.SHA256 != wantHash {
+		return "path and sha256 must match the audited official source registry"
+	}
+	if strings.TrimSpace(reference.Test) == "" || strings.TrimSpace(reference.Assertion) == "" {
+		return "test and assertion identities are required"
 	}
 	return ""
 }
@@ -254,4 +324,9 @@ func compareSteps(expected, observed []TraceStep) string {
 func validDigest(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size
+}
+
+func validRevision(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 20 && value == strings.ToLower(value)
 }

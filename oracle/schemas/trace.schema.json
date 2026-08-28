@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "caseId", "source", "profile", "locale", "keyboardLayout", "steps"],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "caseId": { "type": "string", "minLength": 1 },
     "source": { "enum": ["NVDA", "HooVDA"] },
     "profile": { "const": "nvda-web-2026.1.1" },
@@ -18,12 +18,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["command", "speech", "braille"],
+        "required": ["command", "speech", "braille", "mode"],
         "properties": {
           "command": { "type": "string", "minLength": 1 },
           "speech": { "type": "array", "items": { "type": "string" } },
           "braille": { "type": "array", "items": { "type": "string" } },
-          "mode": { "type": "string" },
+          "mode": { "enum": ["browse", "focus"] },
           "raw": {}
         }
       }

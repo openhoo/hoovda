@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,15 +164,78 @@ func TestActionReturnsGatewayTimeoutWhenCommandSettlesWithFailure(t *testing.T) 
 	}
 }
 
-func TestCapabilitiesDoNotAdvertiseReservedDialogGestures(t *testing.T) {
+func TestCapabilitiesAdvertiseImplementedDialogCommands(t *testing.T) {
 	server := testServer(t)
 	capabilities := request(t, server, http.MethodGet, "/v2/actions", nil, "test-secret")
 	if capabilities.Code != http.StatusOK {
 		t.Fatalf("capabilities status = %d body=%s", capabilities.Code, capabilities.Body.String())
 	}
-	if bytes.Contains(capabilities.Body.Bytes(), []byte(`"id":"elementsList"`)) || bytes.Contains(capabilities.Body.Bytes(), []byte(`"id":"find"`)) {
-		t.Fatalf("reserved command was advertised: %s", capabilities.Body.String())
+	if !bytes.Contains(capabilities.Body.Bytes(), []byte(`"id":"elementsList"`)) || !bytes.Contains(capabilities.Body.Bytes(), []byte(`"id":"find"`)) {
+		t.Fatalf("implemented command was not advertised: %s", capabilities.Body.String())
 	}
+}
+
+func TestStructuredFindActionReturnsEvidence(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "find"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	query := "Checkout"
+	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "find", Argument: &query}, "test-secret")
+	if action.Code != http.StatusOK {
+		t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+	}
+	var result ActionResult
+	if err := json.Unmarshal(action.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Delivery != "structured" || !bytes.Contains(action.Body.Bytes(), []byte("Checkout")) {
+		t.Fatalf("result = %#v body=%s", result, action.Body.String())
+	}
+}
+
+func TestFindRequiresBoundedStructuredArgument(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		argument *string
+	}{
+		{name: "missing"},
+		{name: "empty", argument: stringPointer("   ")},
+		{name: "too long", argument: stringPointer(strings.Repeat("x", 501))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := testServer(t)
+			created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "find-invalid"}, "test-secret")
+			var session Session
+			if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+				t.Fatal(err)
+			}
+			action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "find", Argument: test.argument}, "test-secret")
+			if action.Code != http.StatusBadRequest || !bytes.Contains(action.Body.Bytes(), []byte(`"code":"invalid_argument"`)) {
+				t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+			}
+		})
+	}
+}
+
+func TestNonFindActionRejectsStructuredArgument(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "invalid-argument"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	argument := "unexpected"
+	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "nextHeading", Argument: &argument}, "test-secret")
+	if action.Code != http.StatusBadRequest || !bytes.Contains(action.Body.Bytes(), []byte(`"code":"invalid_argument"`)) {
+		t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+	}
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 func TestRejectsSecondSession(t *testing.T) {

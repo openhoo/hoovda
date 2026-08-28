@@ -32,15 +32,27 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 		return Presentation{}
 	}
 	parts := make([]string, 0, 12)
-	if reason == "tableNavigation" {
+	tableNavigation := reason == "tableNavigation" && isCellRole(node.Role)
+	if tableNavigation {
+		if node.Row > 0 {
+			if p.locale == "de-DE" {
+				parts = append(parts, "Zeile "+strconv.Itoa(node.Row))
+			} else {
+				parts = append(parts, "row "+strconv.Itoa(node.Row))
+			}
+		}
+		if node.Column > 0 {
+			if p.locale == "de-DE" {
+				parts = append(parts, "Spalte "+strconv.Itoa(node.Column))
+			} else {
+				parts = append(parts, "column "+strconv.Itoa(node.Column))
+			}
+		}
 		parts = appendDistinct(parts, node.ColumnHeaderText...)
 		parts = appendDistinct(parts, node.RowHeaderText...)
 	}
 	if content := strings.TrimSpace(node.SpokenContent()); content != "" {
 		parts = appendDistinct(parts, content)
-	}
-	if description := strings.TrimSpace(node.Description); description != "" && description != strings.TrimSpace(node.SpokenContent()) {
-		parts = appendDistinct(parts, description)
 	}
 	role := p.role(node.Role)
 	if strings.EqualFold(node.Role, "landmark") {
@@ -48,7 +60,7 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 			role = p.landmark(landmark[0])
 		}
 	}
-	if role != "" && !sameNormalized(parts, role) {
+	if !tableNavigation && role != "" && !sameNormalized(parts, role) {
 		parts = append(parts, role)
 	}
 	if node.HeadingLevel > 0 {
@@ -68,7 +80,7 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 			parts = append(parts, fmt.Sprintf("%d of %d", node.PositionInSet, node.SetSize))
 		}
 	}
-	if node.Row > 0 && node.Column > 0 {
+	if !tableNavigation && node.Row > 0 && node.Column > 0 {
 		if p.locale == "de-DE" {
 			parts = append(parts, fmt.Sprintf("Zeile %d Spalte %d", node.Row, node.Column))
 		} else {
@@ -91,24 +103,155 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 	}
 	if node.Role == "table" && node.RowCount > 0 && node.ColumnCount > 0 {
 		if p.locale == "de-DE" {
-			parts = append(parts, fmt.Sprintf("%d Zeilen %d Spalten", node.RowCount, node.ColumnCount))
+			parts = append(parts, fmt.Sprintf("mit %d Zeilen und %d Spalten", node.RowCount, node.ColumnCount))
 		} else {
-			parts = append(parts, fmt.Sprintf("%d rows %d columns", node.RowCount, node.ColumnCount))
+			parts = append(parts, fmt.Sprintf("with %d rows and %d columns", node.RowCount, node.ColumnCount))
 		}
+	}
+	if description := strings.TrimSpace(node.Description); description != "" && description != strings.TrimSpace(node.SpokenContent()) {
+		parts = appendDistinct(parts, description)
 	}
 	if shouldPresentRelations(reason) {
 		parts = appendDistinct(parts, node.RelationText["described by"]...)
-		parts = appendDistinct(parts, node.RelationText["details"]...)
+		if len(node.RelationText["details"]) > 0 {
+			if p.locale == "de-DE" {
+				parts = appendDistinct(parts, "enthält Details")
+			} else {
+				parts = appendDistinct(parts, "has details")
+			}
+		}
 		if node.HasState("invalid") {
 			parts = appendDistinct(parts, node.RelationText["error message"]...)
 		}
 	}
-	text := strings.Join(nonEmpty(parts), " ")
+	text := strings.Join(nonEmpty(parts), "  ")
 	commands := []events.SpeechCommand{{Kind: "reason", Value: reason}}
 	if node.Locale != "" {
 		commands = append(commands, events.SpeechCommand{Kind: "language", Value: node.Locale})
 	}
-	return Presentation{Speech: text, SpeechCommands: commands, Braille: text}
+	return Presentation{Speech: text, SpeechCommands: commands, Braille: p.presentBraille(node, reason)}
+}
+
+func isCellRole(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "table cell", "cell", "column header", "row header":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Presenter) presentBraille(node *model.Node, reason string) string {
+	parts := make([]string, 0, 12)
+	if reason == "tableNavigation" {
+		if node.Row > 0 {
+			parts = append(parts, "r"+strconv.Itoa(node.Row))
+		}
+		if node.Column > 0 {
+			parts = append(parts, "c"+strconv.Itoa(node.Column))
+		}
+		parts = appendDistinct(parts, node.ColumnHeaderText...)
+		parts = appendDistinct(parts, node.RowHeaderText...)
+	}
+	if content := strings.TrimSpace(node.SpokenContent()); content != "" {
+		parts = appendDistinct(parts, content)
+	}
+	if description := strings.TrimSpace(node.Description); description != "" && description != strings.TrimSpace(node.SpokenContent()) {
+		parts = appendDistinct(parts, description)
+	}
+	if role := p.brailleRole(node); role != "" && !sameNormalized(parts, role) {
+		parts = append(parts, role)
+	}
+	for _, state := range orderedStates(node) {
+		parts = append(parts, p.brailleState(state))
+	}
+	if node.PositionInSet > 0 && node.SetSize > 0 {
+		parts = append(parts, fmt.Sprintf("%d of %d", node.PositionInSet, node.SetSize))
+	}
+	if reason != "tableNavigation" {
+		if node.Row > 0 {
+			parts = append(parts, "r"+strconv.Itoa(node.Row))
+		}
+		if node.Column > 0 {
+			parts = append(parts, "c"+strconv.Itoa(node.Column))
+		}
+	}
+	if node.Role == "table" && node.RowCount > 0 && node.ColumnCount > 0 {
+		parts = append(parts, fmt.Sprintf("%dr %dc", node.RowCount, node.ColumnCount))
+	}
+	if shouldPresentRelations(reason) {
+		parts = appendDistinct(parts, node.RelationText["described by"]...)
+		if len(node.RelationText["details"]) > 0 {
+			parts = appendDistinct(parts, "details")
+		}
+		if node.HasState("invalid") {
+			parts = appendDistinct(parts, node.RelationText["error message"]...)
+		}
+	}
+	return strings.Join(nonEmpty(parts), " ")
+}
+
+func (p *Presenter) brailleRole(node *model.Node) string {
+	role := strings.ToLower(strings.TrimSpace(node.Role))
+	if role == "heading" && node.HeadingLevel > 0 {
+		return "h" + strconv.Itoa(node.HeadingLevel)
+	}
+	if p.locale == "de-DE" {
+		roles := map[string]string{
+			"push button": "schlt", "button": "schlt", "toggle button": "umsch",
+			"check box": "ktrl", "radio button": "opf", "combo box": "kob",
+			"entry": "eing", "password text": "kennw eing", "link": "lnk",
+			"list": "lst", "list item": "lste", "table": "tbl",
+			"table cell": "z", "column header": "spü", "row header": "zü",
+			"document web": "dok", "document frame": "rahm", "frame": "rahm",
+		}
+		if value := roles[role]; value != "" {
+			return value
+		}
+		return p.role(role)
+	}
+	roles := map[string]string{
+		"push button": "btn", "button": "btn", "toggle button": "tgl btn",
+		"check box": "chk", "radio button": "rbtn", "combo box": "cbo",
+		"entry": "edt", "password text": "pwd edt", "link": "lnk",
+		"list": "lst", "list item": "lst item", "table": "tbl",
+		"table cell": "cell", "column header": "ch", "row header": "rh",
+		"document web": "doc", "document frame": "frm", "frame": "frm",
+		"progress bar": "prgbar", "page tab": "tab",
+	}
+	if value := roles[role]; value != "" {
+		return value
+	}
+	return p.role(role)
+}
+
+func (p *Presenter) brailleState(state string) string {
+	if p.locale == "de-DE" {
+		return p.state(state)
+	}
+	states := map[string]string{
+		"checked": "chk", "not checked": "not chk", "mixed": "half chk",
+		"pressed": "pressed", "not pressed": "not pressed", "expanded": "expanded",
+		"collapsed": "collapsed", "selected": "sel", "unavailable": "unavail",
+		"required": "req", "invalid entry": "invalid", "read only": "ro",
+		"visited": "vlnk", "has popup": "submnu", "multiline": "mln", "busy": "busy",
+	}
+	if value := states[state]; value != "" {
+		return value
+	}
+	return state
+}
+
+func (p *Presenter) Details(values []string) Presentation {
+	text := strings.TrimSpace(strings.Join(nonEmpty(append([]string(nil), values...)), " "))
+	if text == "" {
+		if p.locale == "de-DE" {
+			text = "Keine zusätzlichen Details"
+		} else {
+			text = "No additional details"
+		}
+	}
+	return Presentation{Speech: text, Braille: text}
 }
 
 func shouldPresentRelations(reason string) bool {

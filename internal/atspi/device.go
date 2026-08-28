@@ -173,6 +173,12 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 	if event.Type != keyPressedEvent {
 		return false, nil
 	}
+	// XTest emits constituent modifier presses for multi-modifier chords such
+	// as Insert+Ctrl+F. They are not the command key and must not consume the
+	// one-shot virtual NVDA modifier.
+	if isPhysicalModifierKey(key) {
+		return false, nil
+	}
 	gesture := key
 	modifiers := make([]string, 0, 4)
 	if event.Modifiers&4 != 0 {
@@ -186,6 +192,11 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 	}
 	if l.heldModifier != "" {
 		modifiers = append(modifiers, l.heldModifier)
+		// Treat the NVDA modifier as one-shot for the command chord. Some X11
+		// AT-SPI stacks omit the modifier release notification after a
+		// preempted global gesture. Retaining it would turn the next unrelated
+		// key into Insert+key or CapsLock+key and silently bypass its command.
+		l.heldModifier = ""
 	}
 	if len(modifiers) > 0 {
 		gesture = strings.Join(append(modifiers, key), "+")
@@ -196,6 +207,15 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 	}
 	consume, err := l.handler(context.Background(), gesture)
 	return consume, DBusError(err)
+}
+
+func isPhysicalModifierKey(key string) bool {
+	switch key {
+	case "control", "control_l", "control_r", "ctrl", "shift", "shift_l", "shift_r", "alt", "alt_l", "alt_r", "meta_l", "meta_r", "super_l", "super_r":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeEventKey(event DeviceEvent) string {

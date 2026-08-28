@@ -179,12 +179,34 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "missing_gesture", fmt.Errorf("command %q has no %s gesture", command.ID, s.cfg.KeyboardLayout))
 		return
 	}
+	argument := ""
+	if request.Argument != nil {
+		argument = strings.TrimSpace(*request.Argument)
+	}
+	if request.Argument != nil && (argument == "" || len(argument) > 500) {
+		writeError(w, http.StatusBadRequest, "invalid_argument", errors.New("action argument must contain 1 to 500 bytes"))
+		return
+	}
+	if request.Argument != nil && command.ID != "find" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", fmt.Errorf("command %q does not accept an argument", command.ID))
+		return
+	}
+	if request.Argument == nil && command.ID == "find" {
+		writeError(w, http.StatusBadRequest, "invalid_argument", errors.New("find requires an argument through the structured action API"))
+		return
+	}
 	before := s.store.Cursor()
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.ActionTimeout)
 	defer cancel()
-	if err := s.injector.Press(ctx, gestures[0]); err != nil {
-		writeError(w, http.StatusInternalServerError, "input_injection", err)
-		return
+	delivery := "physical"
+	if request.Argument != nil {
+		delivery = "structured"
+		_ = s.engine.ExecuteDirectWithArgument(ctx, command.ID, argument)
+	} else {
+		if err := s.injector.Press(ctx, gestures[0]); err != nil {
+			writeError(w, http.StatusInternalServerError, "input_injection", err)
+			return
+		}
 	}
 	observed, _, settled, err := s.store.WaitFor(ctx, before, session.ID, func(event events.Event) bool {
 		return event.Kind == events.KindCommandSettled && event.CausalCommand == command.ID
@@ -227,7 +249,7 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "event_cursor", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ActionResult{Command: command.ID, Gesture: gestures[0], BeforeSequence: before, Cursor: cursor, TimedOut: timedOut, Events: resultEvents, State: s.engine.State()})
+	writeJSON(w, http.StatusOK, ActionResult{Command: command.ID, Gesture: gestures[0], Delivery: delivery, BeforeSequence: before, Cursor: cursor, TimedOut: timedOut, Events: resultEvents, State: s.engine.State()})
 }
 
 func (s *Server) sessionEvents(w http.ResponseWriter, r *http.Request) {

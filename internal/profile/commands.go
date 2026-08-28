@@ -109,6 +109,7 @@ var commands = []Command{
 	{ID: "firstTableRow", Label: "First table row", Desktop: []string{"ctrl+alt+pageup"}, Laptop: []string{"ctrl+alt+pageup"}, Category: "table", Direction: -1, ConsumesBrowse: true},
 	{ID: "lastTableRow", Label: "Last table row", Desktop: []string{"ctrl+alt+pagedown"}, Laptop: []string{"ctrl+alt+pagedown"}, Category: "table", Direction: 1, ConsumesBrowse: true},
 	{ID: "readCurrent", Label: "Read current location", Desktop: []string{"insert+tab"}, Laptop: []string{"capslock+tab"}, Category: "report", ConsumesBrowse: true},
+	{ID: "reportDetails", Label: "Report details", Desktop: []string{"insert+d"}, Laptop: []string{"capslock+d"}, Category: "report", ConsumesBrowse: true},
 	{ID: "sayAll", Label: "Read from current location", Desktop: []string{"insert+down"}, Laptop: []string{"capslock+a"}, Category: "report", ConsumesBrowse: true},
 	{ID: "toggleFocusMode", Label: "Toggle browse or focus mode", Desktop: []string{"insert+space"}, Laptop: []string{"capslock+space"}, Category: "mode", ConsumesBrowse: true},
 	{ID: "toggleSingleLetterNavigation", Label: "Toggle single letter navigation", Desktop: []string{"insert+shift+space"}, Laptop: []string{"capslock+shift+space"}, Category: "mode", ConsumesBrowse: true},
@@ -128,22 +129,12 @@ func Commands() []Command {
 	return result
 }
 
-// SupportedCommands is the public control API catalog. Commands that only
-// have reserved gestures but no behavior yet must not be advertised as usable
-// test actions.
 func SupportedCommands() []Command {
-	result := make([]Command, 0, len(commands))
-	for _, command := range commands {
-		if command.Category != "dialog" {
-			result = append(result, command)
-		}
-	}
-	return result
+	return Commands()
 }
 
 func SupportedCommandByID(id string) (Command, bool) {
-	command, ok := CommandByID(id)
-	return command, ok && command.Category != "dialog"
+	return CommandByID(id)
 }
 
 func CommandByID(id string) (Command, bool) {
@@ -162,8 +153,10 @@ func CommandByGesture(gesture, layout string) (Command, bool) {
 		if layout == "laptop" {
 			gestures = command.Laptop
 		}
-		if slices.Contains(gestures, gesture) {
-			return command, true
+		for _, candidate := range gestures {
+			if NormalizeGesture(candidate) == gesture {
+				return command, true
+			}
 		}
 	}
 	return Command{}, false
@@ -212,7 +205,7 @@ func MatchTarget(target string) func(*model.Node) bool {
 		case "button":
 			return role == "push button" || role == "toggle button" || role == "button"
 		case "formField":
-			return slices.Contains([]string{"entry", "password text", "check box", "radio button", "combo box", "spin button", "slider", "push button", "toggle button"}, role)
+			return slices.Contains([]string{"entry", "password text", "check box", "radio button", "combo box", "spin button", "slider", "button", "push button", "toggle button"}, role)
 		case "link":
 			return strings.Contains(role, "link")
 		case "visitedLink":
@@ -259,7 +252,6 @@ func MatchTarget(target string) func(*model.Node) bool {
 
 func ValidateCatalog() error {
 	seenIDs := map[string]bool{}
-	seenGestures := map[string]string{}
 	for _, command := range commands {
 		if command.ID == "" || command.Label == "" {
 			return fmt.Errorf("command has empty identity")
@@ -268,12 +260,21 @@ func ValidateCatalog() error {
 			return fmt.Errorf("duplicate command id %q", command.ID)
 		}
 		seenIDs[command.ID] = true
-		for _, gesture := range command.Desktop {
-			normalized := NormalizeGesture(gesture)
-			if existing, ok := seenGestures[normalized]; ok && existing != command.ID {
-				return fmt.Errorf("desktop gesture %q belongs to both %s and %s", normalized, existing, command.ID)
+	}
+	for _, layout := range []string{"desktop", "laptop"} {
+		seenGestures := map[string]string{}
+		for _, command := range commands {
+			gestures := command.Desktop
+			if layout == "laptop" {
+				gestures = command.Laptop
 			}
-			seenGestures[normalized] = command.ID
+			for _, gesture := range gestures {
+				normalized := NormalizeGesture(gesture)
+				if existing, ok := seenGestures[normalized]; ok && existing != command.ID {
+					return fmt.Errorf("%s gesture %q belongs to both %s and %s", layout, normalized, existing, command.ID)
+				}
+				seenGestures[normalized] = command.ID
+			}
 		}
 	}
 	return nil

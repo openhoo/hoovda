@@ -517,11 +517,7 @@ func resolveGraphContext(graph *model.Graph) {
 		values := make([]string, 0, len(ids))
 		seen := map[string]bool{}
 		for _, id := range ids {
-			node := graph.Nodes[id]
-			if node == nil {
-				continue
-			}
-			value := node.SpokenContent()
+			value := graphText(graph, id)
 			if value != "" && !seen[value] {
 				seen[value] = true
 				values = append(values, value)
@@ -542,6 +538,39 @@ func resolveGraphContext(graph *model.Graph) {
 			}
 		}
 	}
+}
+
+func graphText(graph *model.Graph, root model.ObjectID) string {
+	if graph == nil || graph.Nodes[root] == nil {
+		return ""
+	}
+	if value := graph.Nodes[root].SpokenContent(); value != "" {
+		return value
+	}
+	values := make([]string, 0, 4)
+	seenText := map[string]bool{}
+	seenNodes := map[model.ObjectID]bool{root: true}
+	queue := append([]model.ObjectID(nil), graph.Nodes[root].Children...)
+	for index := 0; index < len(queue) && len(seenNodes) <= 4096; index++ {
+		id := queue[index]
+		if seenNodes[id] {
+			continue
+		}
+		seenNodes[id] = true
+		node := graph.Nodes[id]
+		if node == nil {
+			continue
+		}
+		if value := node.SpokenContent(); value != "" {
+			if !seenText[value] {
+				seenText[value] = true
+				values = append(values, value)
+			}
+			continue
+		}
+		queue = append(queue, node.Children...)
+	}
+	return strings.Join(values, " ")
 }
 
 func (c *Client) children(ctx context.Context, ref ObjectReference) ([]ObjectReference, error) {

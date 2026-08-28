@@ -7,19 +7,23 @@
   "required": ["schemaVersion", "profile", "status", "oracle", "cases"],
   "properties": {
     "$schema": { "type": "string" },
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "profile": { "const": "nvda-web-2026.1.1" },
     "status": { "enum": ["incomplete", "complete"] },
     "notes": { "type": "string" },
     "oracle": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["product", "version", "platform", "captureToolHash"],
+      "required": ["product", "version", "platform", "releaseTag", "releaseCommit", "captureToolUrl", "captureToolHash", "evidenceLicense"],
       "properties": {
         "product": { "const": "NVDA" },
         "version": { "const": "2026.1.1" },
         "platform": { "type": "string", "minLength": 1 },
-        "captureToolHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "releaseTag": { "const": "release-2026.1.1" },
+        "releaseCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "captureToolUrl": { "type": "string", "pattern": "^https://" },
+        "captureToolHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "evidenceLicense": { "type": "string", "minLength": 1 }
       }
     },
     "cases": {
@@ -27,7 +31,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "locale", "keyboardLayout", "fixture", "fixtureSha256", "expected", "expectedSha256", "observed", "observedSha256", "tags"],
+        "required": ["id", "locale", "keyboardLayout", "fixture", "fixtureSha256", "expected", "expectedSha256", "observed", "observedSha256", "reference", "tags"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "locale": { "enum": ["en-US", "de-DE"] },
@@ -38,6 +42,19 @@
           "expectedSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "observed": { "type": "string", "minLength": 1 },
           "observedSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "reference": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["url", "revision", "path", "sha256", "test", "assertion"],
+            "properties": {
+              "url": { "type": "string", "pattern": "^https://" },
+              "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+              "path": { "type": "string", "minLength": 1 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "test": { "type": "string", "minLength": 1 },
+              "assertion": { "type": "string", "minLength": 1 }
+            }
+          },
           "tags": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
         }
       }

@@ -79,18 +79,22 @@ func TestResolveGraphContextDereferencesHeadersAndRelations(t *testing.T) {
 	root := model.ObjectID{Bus: "app", Path: "/root"}
 	header := model.ObjectID{Bus: "app", Path: "/header"}
 	description := model.ObjectID{Bus: "app", Path: "/description"}
+	details := model.ObjectID{Bus: "app", Path: "/details"}
+	detailsText := model.ObjectID{Bus: "app", Path: "/details/text"}
 	cell := model.ObjectID{Bus: "app", Path: "/cell"}
 	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
-		root:        {ID: root, Role: "document web", Children: []model.ObjectID{header, description, cell}},
+		root:        {ID: root, Role: "document web", Children: []model.ObjectID{header, description, details, cell}},
 		header:      {ID: header, Parent: root, Role: "column header", Name: "Price"},
 		description: {ID: description, Parent: root, Role: "paragraph", Text: "Before tax"},
+		details:     {ID: details, Parent: root, Role: "note", Children: []model.ObjectID{detailsText}},
+		detailsText: {ID: detailsText, Parent: details, Role: "paragraph", Text: "Press to self-destruct"},
 		cell: {
 			ID:            cell,
 			Parent:        root,
 			Role:          "table cell",
 			Name:          "12",
 			ColumnHeaders: []model.ObjectID{header, header},
-			Relations:     map[string][]model.ObjectID{"described by": {description}},
+			Relations:     map[string][]model.ObjectID{"described by": {description}, "details": {details}},
 		},
 	}, 1)
 	if err != nil {
@@ -102,6 +106,9 @@ func TestResolveGraphContextDereferencesHeadersAndRelations(t *testing.T) {
 	}
 	if got := graph.Nodes[cell].RelationText["described by"]; len(got) != 1 || got[0] != "Before tax" {
 		t.Fatalf("relation text = %#v", got)
+	}
+	if got := graph.Nodes[cell].RelationText["details"]; len(got) != 1 || got[0] != "Press to self-destruct" {
+		t.Fatalf("nested relation text = %#v", got)
 	}
 }
 

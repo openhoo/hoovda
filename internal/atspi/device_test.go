@@ -2,6 +2,7 @@ package atspi
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -78,6 +79,57 @@ func TestPageKeysNormalizeFromX11NamesAndHardwareCodes(t *testing.T) {
 		if got := normalizeEventKey(item.event); got != item.want {
 			t.Fatalf("normalizeEventKey(%#v) = %q, want %q", item.event, got, item.want)
 		}
+	}
+}
+
+func TestVirtualModifierCannotStickAfterChord(t *testing.T) {
+	var gestures []string
+	listener := &DeviceListener{
+		layout: "desktop",
+		handler: func(_ context.Context, gesture string) (bool, error) {
+			gestures = append(gestures, gesture)
+			return true, nil
+		},
+	}
+	events := []DeviceEvent{
+		{Type: keyPressedEvent, EventString: "Insert"},
+		{Type: keyPressedEvent, EventString: "d"},
+		// Deliberately omit Insert release, matching the X11/AT-SPI edge case.
+		{Type: keyPressedEvent, EventString: "Return"},
+	}
+	for _, event := range events {
+		if _, dbusErr := listener.NotifyEvent(event); dbusErr != nil {
+			t.Fatal(dbusErr)
+		}
+	}
+	want := []string{"insert+d", "enter"}
+	if !slices.Equal(gestures, want) {
+		t.Fatalf("gestures = %#v, want %#v", gestures, want)
+	}
+}
+
+func TestVirtualModifierSurvivesConstituentModifierPresses(t *testing.T) {
+	var gestures []string
+	listener := &DeviceListener{
+		layout: "desktop",
+		handler: func(_ context.Context, gesture string) (bool, error) {
+			gestures = append(gestures, gesture)
+			return true, nil
+		},
+	}
+	events := []DeviceEvent{
+		{Type: keyPressedEvent, EventString: "Insert"},
+		{Type: keyPressedEvent, EventString: "Control_L", Modifiers: 4},
+		{Type: keyPressedEvent, EventString: "f", Modifiers: 4},
+	}
+	for _, event := range events {
+		if _, dbusErr := listener.NotifyEvent(event); dbusErr != nil {
+			t.Fatal(dbusErr)
+		}
+	}
+	want := []string{"ctrl+insert+f"}
+	if !slices.Equal(gestures, want) {
+		t.Fatalf("gestures = %#v, want %#v", gestures, want)
 	}
 }
 
