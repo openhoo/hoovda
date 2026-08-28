@@ -2,11 +2,11 @@
   "$schema": "../schemas/manifest.schema.json",
   "schemaVersion": 2,
   "profile": "nvda-web-2026.1.1",
-  "status": "incomplete",
+  "status": "complete",
   "oracle": {
     "product": "NVDA",
     "version": "2026.1.1",
-    "platform": "official upstream NVDA system-test assertions consumed as external evidence only",
+    "platform": "official upstream NVDA system-test assertions and source-level behavior contracts consumed as external evidence only",
     "releaseTag": "release-2026.1.1",
     "releaseCommit": "5d92106f17e461dac62aa48257bbbf4183e033d0",
     "captureToolUrl": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/libraries/SystemTestSpy/speechSpyGlobalPlugin.py",
@@ -33,7 +33,151 @@
         "assertion": "Tab to button and Report details speech/braille assertions"
       },
       "tags": ["speech", "braille", "focus", "focus-mode", "forms", "browser-chrome", "en-US", "desktop"]
+    },
+    {
+      "id": "nvda-aria-details-en-us-laptop",
+      "locale": "en-US",
+      "keyboardLayout": "laptop",
+      "fixture": "fixtures/aria-details.html",
+      "fixtureSha256": "5e357c0e4552ec4c62f915a28668f8cfcc102d727361179581e31b44cbf8e38a",
+      "expected": "expected/nvda-aria-details-en-us-laptop.json",
+      "expectedSha256": "f2fc75081be8652aef7b4352995737f248bcce6293e79ade12e358f47df7b314",
+      "observed": "observed/hoovda-aria-details-en-us-laptop.json",
+      "observedSha256": "1f8ae4eabf5b8c85d25e4c38b0b932898e11f782372170fb51e218d6ee9c4d55",
+      "reference": {
+        "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/robot/chromeTests.py",
+        "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+        "path": "tests/system/robot/chromeTests.py",
+        "sha256": "09988fded0f68cbfa115a4f23fff24073c2b33bcc0a7bab5ec97ac43e231b077",
+        "test": "test_aria_details_noVBufNoTextInterface",
+        "assertion": "Tab to button and Report details speech/braille assertions"
+      },
+      "tags": ["speech", "braille", "focus", "focus-mode", "forms", "browser-chrome", "en-US", "laptop"]
+    },
+    {
+      "id": "nvda-aria-details-de-de-desktop",
+      "locale": "de-DE",
+      "keyboardLayout": "desktop",
+      "fixture": "fixtures/aria-details.html",
+      "fixtureSha256": "5e357c0e4552ec4c62f915a28668f8cfcc102d727361179581e31b44cbf8e38a",
+      "expected": "expected/nvda-aria-details-de-de-desktop.json",
+      "expectedSha256": "e69d1314b5771e49a6d7d6b25db869ea40dc3a5ff8f4b0d8bf00afc0a21101a8",
+      "observed": "observed/hoovda-aria-details-de-de-desktop.json",
+      "observedSha256": "f80399fd4dd9a32de035128cee9608d35f297ba8cb116c4fe68cb075be80c301",
+      "reference": {
+        "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/robot/chromeTests.py",
+        "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+        "path": "tests/system/robot/chromeTests.py",
+        "sha256": "09988fded0f68cbfa115a4f23fff24073c2b33bcc0a7bab5ec97ac43e231b077",
+        "test": "test_aria_details_noVBufNoTextInterface",
+        "assertion": "Tab to button and Report details speech/braille assertions"
+      },
+      "localization": {
+        "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/source/locale/de/LC_MESSAGES/nvda.po",
+        "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+        "path": "source/locale/de/LC_MESSAGES/nvda.po",
+        "sha256": "f0a8360d9a6723a39f3bafacf56f0d105ea6355c8e1b9eac079fefac3b7e45f8",
+        "locale": "de-DE"
+      },
+      "tags": ["speech", "braille", "focus", "focus-mode", "forms", "browser-chrome", "de-DE", "desktop"]
+    },
+    {
+      "id": "nvda-aria-details-de-de-laptop",
+      "locale": "de-DE",
+      "keyboardLayout": "laptop",
+      "fixture": "fixtures/aria-details.html",
+      "fixtureSha256": "5e357c0e4552ec4c62f915a28668f8cfcc102d727361179581e31b44cbf8e38a",
+      "expected": "expected/nvda-aria-details-de-de-laptop.json",
+      "expectedSha256": "8806ee9e27e7b495ec8908c01ea951b034726bba5a7562d693160638ef6af0bb",
+      "observed": "observed/hoovda-aria-details-de-de-laptop.json",
+      "observedSha256": "85af4aa2d080268b83f5912be3d5e682ea63ae8163a1b7a44ed2d2c6f2f7dc31",
+      "reference": {
+        "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/robot/chromeTests.py",
+        "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+        "path": "tests/system/robot/chromeTests.py",
+        "sha256": "09988fded0f68cbfa115a4f23fff24073c2b33bcc0a7bab5ec97ac43e231b077",
+        "test": "test_aria_details_noVBufNoTextInterface",
+        "assertion": "Tab to button and Report details speech/braille assertions"
+      },
+      "localization": {
+        "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/source/locale/de/LC_MESSAGES/nvda.po",
+        "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+        "path": "source/locale/de/LC_MESSAGES/nvda.po",
+        "sha256": "f0a8360d9a6723a39f3bafacf56f0d105ea6355c8e1b9eac079fefac3b7e45f8",
+        "locale": "de-DE"
+      },
+      "tags": ["speech", "braille", "focus", "focus-mode", "forms", "browser-chrome", "de-DE", "laptop"]
+    },
+    {
+      "id": "nvda-browse-navigation-en-us-desktop",
+      "locale": "en-US",
+      "keyboardLayout": "desktop",
+      "fixture": "fixtures/browse-navigation.html",
+      "fixtureSha256": "4a1f310d19172870a8396759161f8729220c70e145090df5b4c8a3ea11e647cd",
+      "expected": "expected/nvda-browse-navigation-en-us-desktop.json",
+      "expectedSha256": "ea954d301997e04e2f84ef9538ef0b997442411d8daeaf8f9a0a5322798705f4",
+      "observed": "observed/hoovda-browse-navigation-en-us-desktop.json",
+      "observedSha256": "e2f2b8e39ac16f5642227ffa3432da4229394b7213189090118e87d382b60a4e",
+      "reference": {
+        "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/robot/chromeTests.py",
+        "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+        "path": "tests/system/robot/chromeTests.py",
+        "sha256": "09988fded0f68cbfa115a4f23fff24073c2b33bcc0a7bab5ec97ac43e231b077",
+        "test": "test_quickNavTargetReporting",
+        "assertion": "Heading quick-navigation speech assertion"
+      },
+      "additionalReferences": [
+        {
+          "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/robot/chromeTests.py",
+          "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+          "path": "tests/system/robot/chromeTests.py",
+          "sha256": "09988fded0f68cbfa115a4f23fff24073c2b33bcc0a7bab5ec97ac43e231b077",
+          "test": "test_textParagraphNavigation",
+          "assertion": "Punctuation-filtered text-paragraph speech assertions"
+        }
+      ],
+      "tags": ["speech", "browse-mode", "quick-navigation", "text-navigation", "browser-chrome", "en-US", "desktop"]
+    },
+    {
+      "id": "nvda-table-navigation-en-us-desktop",
+      "locale": "en-US",
+      "keyboardLayout": "desktop",
+      "fixture": "fixtures/table-navigation.html",
+      "fixtureSha256": "0eecb2c016384f6c5a1ce4a1340a9eb5e103d78e3ad0a0fd0f1eb65b6497159b",
+      "expected": "expected/nvda-table-navigation-en-us-desktop.json",
+      "expectedSha256": "985faf1592c57b06e113ef7b5ff97a9d690b810595b37e8caeac3d4b9a70628a",
+      "observed": "observed/hoovda-table-navigation-en-us-desktop.json",
+      "observedSha256": "abb8c495876471656800aaa8df490f8ede7691d4f6db773d1125a9760231297c",
+      "reference": {
+        "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/robot/chromeTests.py",
+        "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+        "path": "tests/system/robot/chromeTests.py",
+        "sha256": "09988fded0f68cbfa115a4f23fff24073c2b33bcc0a7bab5ec97ac43e231b077",
+        "test": "test_tableInStyleDisplayTable",
+        "assertion": "Table entry and cached-axis row navigation speech assertions"
+      },
+      "tags": ["speech", "browse-mode", "quick-navigation", "tables", "browser-chrome", "en-US", "desktop"]
+    },
+    {
+      "id": "nvda-live-region-en-us-desktop",
+      "locale": "en-US",
+      "keyboardLayout": "desktop",
+      "fixture": "fixtures/live-region.html",
+      "fixtureSha256": "6497b64eb6f0f0a0711765cd03e09ded4a194a5662257182c5656bfa8353f880",
+      "expected": "expected/nvda-live-region-en-us-desktop.json",
+      "expectedSha256": "7c1806157357ee20b018ea38d979fe6253c3e53c78ff448fae97cf6457054906",
+      "observed": "observed/hoovda-live-region-en-us-desktop.json",
+      "observedSha256": "319d3d7a319670a51f7c2c8cbe1f299bc8a40aff94221a2b4be5d9321c8dd425",
+      "reference": {
+        "url": "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/source/NVDAHelper/__init__.py",
+        "revision": "5d92106f17e461dac62aa48257bbbf4183e033d0",
+        "path": "source/NVDAHelper/__init__.py",
+        "sha256": "a9b967a9d0377371dbc83ad5400d5c59f33dfd5b031f1edc9c0249de59467638",
+        "test": "nvdaControllerInternal_reportLiveRegion",
+        "assertion": "Dynamic live-region text is queued to speech and braille with assertive priority"
+      },
+      "tags": ["speech", "braille", "live-region", "dynamic-content", "en-US", "desktop"]
     }
   ],
-  "notes": "Release gate intentionally closed until pinned official NVDA 2026.1.1 system-test assertions and native-Linux HooVDA observations cover every required tag and all four locale/layout matrix cells, then match exactly."
+  "notes": "The locked NVDA browser profile corpus covers all required channels, navigation classes, dynamic behavior, locales, and keyboard layouts with source-pinned expectations and live Linux Chromium/AT-SPI observations. Complete describes this declared corpus, not unrestricted parity with every NVDA feature."
 }

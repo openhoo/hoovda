@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 2,
+  "caseId": "nvda-live-region-en-us-desktop",
+  "source": "NVDA",
+  "profile": "nvda-web-2026.1.1",
+  "locale": "en-US",
+  "keyboardLayout": "desktop",
+  "steps": [
+    {
+      "command": "activate",
+      "speech": ["Order review ready"],
+      "braille": ["Order review ready"],
+      "mode": "focus",
+      "raw": {
+        "upstreamTest": "nvdaControllerInternal_reportLiveRegion",
+        "politeness": "assertive",
+        "gesture": "enter"
+      }
+    }
+  ]
+}

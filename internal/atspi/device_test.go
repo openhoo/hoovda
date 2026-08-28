@@ -54,12 +54,41 @@ func TestListenerGrabsAreSpecificAndCoverLayouts(t *testing.T) {
 	if !hasGrab(listenerGrabs("laptop"), 0, 0xffe5) {
 		t.Fatal("laptop Caps Lock virtual modifier grab missing")
 	}
+	if !hasGrab(listenerGrabs("laptop"), 0, int32('D')) || !hasGrab(listenerGrabs("laptop"), 2, int32('D')) {
+		t.Fatal("laptop Caps Lock uppercase command-key grabs missing")
+	}
 }
 
 func TestShiftedNumberNormalizesToGestureKey(t *testing.T) {
 	event := DeviceEvent{EventString: "!", Modifiers: 1}
 	if got := normalizeEventKey(event); got != "1" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestX11CapsLockNameNormalizesToVirtualModifier(t *testing.T) {
+	if got := normalizeEventKey(DeviceEvent{EventString: "Caps_Lock"}); got != "capslock" {
+		t.Fatalf("got %q", got)
+	}
+	var gestures []string
+	listener := &DeviceListener{
+		layout: "laptop",
+		handler: func(_ context.Context, gesture string) (bool, error) {
+			gestures = append(gestures, gesture)
+			return true, nil
+		},
+	}
+	for _, event := range []DeviceEvent{
+		{Type: keyPressedEvent, EventString: "Caps_Lock"},
+		{Type: keyPressedEvent, EventString: "d"},
+		{Type: keyReleasedEvent, EventString: "Caps_Lock"},
+	} {
+		if _, dbusErr := listener.NotifyEvent(event); dbusErr != nil {
+			t.Fatal(dbusErr)
+		}
+	}
+	if !slices.Equal(gestures, []string{"capslock+d"}) {
+		t.Fatalf("gestures = %#v", gestures)
 	}
 }
 

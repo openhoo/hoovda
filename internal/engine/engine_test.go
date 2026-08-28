@@ -201,7 +201,7 @@ func TestWordAndLineNavigationRemainInsideTextNode(t *testing.T) {
 	paragraph := model.ObjectID{Bus: "app", Path: "/paragraph"}
 	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
 		root:      {ID: root, Role: "document web", Name: "Example", Children: []model.ObjectID{paragraph}},
-		paragraph: {ID: paragraph, Parent: root, Role: "paragraph", Text: "First line\n\nThird line", Attributes: map[string]string{"tag": "p"}},
+		paragraph: {ID: paragraph, Parent: root, Role: "paragraph", Text: "First line!\n\nThird line", Attributes: map[string]string{"tag": "p"}},
 	}, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +214,7 @@ func TestWordAndLineNavigationRemainInsideTextNode(t *testing.T) {
 	if err := engine.ExecuteDirect(context.Background(), "nextWord"); err != nil {
 		t.Fatal(err)
 	}
-	if speech := speechAfter(t, store, before); speech != "line" {
+	if speech := speechAfter(t, store, before); speech != "line!" {
 		t.Fatalf("next word speech = %q", speech)
 	}
 	if state := engine.State(); state.Cursor.Object != paragraph || state.Cursor.Offset != 6 {
@@ -233,8 +233,28 @@ func TestWordAndLineNavigationRemainInsideTextNode(t *testing.T) {
 	if speech := speechAfter(t, store, before); speech != "blank" {
 		t.Fatalf("blank line speech = %q", speech)
 	}
-	if state := engine.State(); state.Cursor.Object != paragraph || state.Cursor.Offset != 11 {
+	if state := engine.State(); state.Cursor.Object != paragraph || state.Cursor.Offset != 12 {
 		t.Fatalf("line cursor = %#v", state.Cursor)
+	}
+}
+
+func TestQuickTextParagraphReportsOnlyText(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	paragraph := model.ObjectID{Bus: "app", Path: "/paragraph"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root:      {ID: root, Role: "document web", Children: []model.ObjectID{paragraph}},
+		paragraph: {ID: paragraph, Parent: root, Role: "paragraph", Text: "Hello, world!"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, store := engineForGraph(t, graph)
+	before := store.Cursor()
+	if err := engine.ExecuteDirect(context.Background(), "nextParagraph"); err != nil {
+		t.Fatal(err)
+	}
+	if speech := speechAfter(t, store, before); speech != "Hello, world!" {
+		t.Fatalf("speech = %q", speech)
 	}
 }
 
@@ -261,6 +281,9 @@ func TestTableNavigationUsesSpansAndFirstLastCommands(t *testing.T) {
 	if err := engine.ExecuteDirect(context.Background(), "nextTable"); err != nil {
 		t.Fatal(err)
 	}
+	if got := engine.State().Cursor.Object; got != first {
+		t.Fatalf("table entry cursor = %#v", got)
+	}
 	if err := engine.ExecuteDirect(context.Background(), "lastTableRow"); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +297,7 @@ func TestTableNavigationUsesSpansAndFirstLastCommands(t *testing.T) {
 	if got := engine.State().Cursor.Object; got != last {
 		t.Fatalf("span-aware next column cursor = %#v", got)
 	}
-	if speech := speechAfter(t, store, before); speech != "row 2  column 3  Last" {
+	if speech := speechAfter(t, store, before); speech != "column 3  Last" {
 		t.Fatalf("next column speech = %q", speech)
 	}
 	if err := engine.ExecuteDirect(context.Background(), "firstTableColumn"); err != nil {

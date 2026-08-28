@@ -23,12 +23,8 @@ jobs:
       - run: go vet ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - run: go build ./cmd/hoovda
-      - name: Verify release gate remains closed without complete oracle
-        run: |
-          if go run ./cmd/hoovda conformance --manifest oracle/corpus/manifest.json; then
-            echo "incomplete oracle corpus unexpectedly passed" >&2
-            exit 1
-          fi
+      - name: Verify locked-profile oracle conformance
+        run: go run ./cmd/hoovda conformance --manifest oracle/corpus/manifest.json
 
   image:
     runs-on: ubuntu-latest

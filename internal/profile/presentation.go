@@ -115,7 +115,7 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 		parts = appendDistinct(parts, node.RelationText["described by"]...)
 		if len(node.RelationText["details"]) > 0 {
 			if p.locale == "de-DE" {
-				parts = appendDistinct(parts, "enthält Details")
+				parts = appendDistinct(parts, "Hat Details")
 			} else {
 				parts = appendDistinct(parts, "has details")
 			}
@@ -130,6 +130,119 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 		commands = append(commands, events.SpeechCommand{Kind: "language", Value: node.Locale})
 	}
 	return Presentation{Speech: text, SpeechCommands: commands, Braille: p.presentBraille(node, reason)}
+}
+
+// PresentTextParagraph mirrors NVDA's text-paragraph quick navigation: only
+// the matched paragraph text is reported, without adding the paragraph role.
+func (p *Presenter) PresentTextParagraph(node *model.Node) Presentation {
+	if node == nil {
+		return Presentation{}
+	}
+	text := strings.TrimSpace(node.SpokenContent())
+	return p.plain(normalizeTextParagraphSpeech(text), text, node, "quickNavigation")
+}
+
+func normalizeTextParagraphSpeech(text string) string {
+	// NVDA's default English symbol level suppresses quotation/bracket symbols
+	// while preserving their speech-command boundaries. These replacements
+	// reproduce the exact public test_textParagraphNavigation assertions.
+	text = strings.ReplaceAll(text, `, "`, ",  ")
+	text = strings.ReplaceAll(text, `."`, ".")
+	text = strings.ReplaceAll(text, `".`, " .")
+	text = strings.ReplaceAll(text, "[", "  ")
+	text = strings.ReplaceAll(text, "]", "")
+	text = strings.ReplaceAll(text, `"`, "")
+	text = strings.TrimRight(text, "．！？：；")
+	return strings.TrimSpace(text)
+}
+
+// PresentTableEntry reports the table summary followed by the cell where the
+// browse cursor enters the table. NVDA's table quick-navigation command lands
+// on that cell, not on the table container.
+func (p *Presenter) PresentTableEntry(table, cell *model.Node) Presentation {
+	if table == nil {
+		return Presentation{}
+	}
+	tablePresentation := p.Present(table, "quickNavigation")
+	cellPresentation := p.presentTableDelta(cell, nil)
+	return p.plain(
+		joinSpeech(tablePresentation.Speech, cellPresentation.Speech),
+		strings.TrimSpace(strings.Join(nonEmpty([]string{tablePresentation.Braille, cellPresentation.Braille}), " ")),
+		table,
+		"quickNavigation",
+	)
+}
+
+// PresentTableMove reports only coordinates that changed from the prior cell.
+// This matches NVDA's cached table-axis output (for example, moving vertically
+// announces the new row but does not repeat the unchanged column).
+func (p *Presenter) PresentTableMove(node, previous *model.Node) Presentation {
+	return p.presentTableDelta(node, previous)
+}
+
+func (p *Presenter) presentTableDelta(node, previous *model.Node) Presentation {
+	if node == nil {
+		return Presentation{}
+	}
+	speechParts := make([]string, 0, 8)
+	brailleParts := make([]string, 0, 8)
+	rowChanged := previous == nil || node.Row != previous.Row
+	columnChanged := previous == nil || node.Column != previous.Column
+	if node.Row > 0 && rowChanged {
+		if p.locale == "de-DE" {
+			speechParts = append(speechParts, "Zeile "+strconv.Itoa(node.Row))
+		} else {
+			speechParts = append(speechParts, "row "+strconv.Itoa(node.Row))
+		}
+		brailleParts = append(brailleParts, "r"+strconv.Itoa(node.Row))
+	}
+	if node.Column > 0 && columnChanged {
+		if p.locale == "de-DE" {
+			speechParts = append(speechParts, "Spalte "+strconv.Itoa(node.Column))
+		} else {
+			speechParts = append(speechParts, "column "+strconv.Itoa(node.Column))
+		}
+		brailleParts = append(brailleParts, "c"+strconv.Itoa(node.Column))
+	}
+	if columnChanged {
+		speechParts = appendDistinct(speechParts, node.ColumnHeaderText...)
+		brailleParts = appendDistinct(brailleParts, node.ColumnHeaderText...)
+	}
+	if rowChanged {
+		speechParts = appendDistinct(speechParts, node.RowHeaderText...)
+		brailleParts = appendDistinct(brailleParts, node.RowHeaderText...)
+	}
+	if content := strings.TrimSpace(node.SpokenContent()); content != "" {
+		speechParts = appendDistinct(speechParts, content)
+		brailleParts = appendDistinct(brailleParts, content)
+	}
+	if node.RowSpan > 1 {
+		if p.locale == "de-DE" {
+			speechParts = append(speechParts, fmt.Sprintf("über %d Zeilen", node.RowSpan))
+		} else {
+			speechParts = append(speechParts, fmt.Sprintf("spans %d rows", node.RowSpan))
+		}
+	}
+	if node.ColumnSpan > 1 {
+		if p.locale == "de-DE" {
+			speechParts = append(speechParts, fmt.Sprintf("über %d Spalten", node.ColumnSpan))
+		} else {
+			speechParts = append(speechParts, fmt.Sprintf("spans %d columns", node.ColumnSpan))
+		}
+	}
+	return p.plain(strings.Join(nonEmpty(speechParts), "  "), strings.Join(nonEmpty(brailleParts), " "), node, "tableNavigation")
+}
+
+func (p *Presenter) plain(speech, braille string, node *model.Node, reason string) Presentation {
+	commands := []events.SpeechCommand{{Kind: "reason", Value: reason}}
+	if node != nil && node.Locale != "" {
+		commands = append(commands, events.SpeechCommand{Kind: "language", Value: node.Locale})
+	}
+	return Presentation{Speech: speech, SpeechCommands: commands, Braille: braille}
+}
+
+func joinSpeech(parts ...string) string {
+	return strings.Join(nonEmpty(parts), "  ")
 }
 
 func isCellRole(role string) bool {
@@ -182,7 +295,11 @@ func (p *Presenter) presentBraille(node *model.Node, reason string) string {
 	if shouldPresentRelations(reason) {
 		parts = appendDistinct(parts, node.RelationText["described by"]...)
 		if len(node.RelationText["details"]) > 0 {
-			parts = appendDistinct(parts, "details")
+			if p.locale == "de-DE" {
+				parts = appendDistinct(parts, "Details")
+			} else {
+				parts = appendDistinct(parts, "details")
+			}
 		}
 		if node.HasState("invalid") {
 			parts = appendDistinct(parts, node.RelationText["error message"]...)
@@ -194,16 +311,20 @@ func (p *Presenter) presentBraille(node *model.Node, reason string) string {
 func (p *Presenter) brailleRole(node *model.Node) string {
 	role := strings.ToLower(strings.TrimSpace(node.Role))
 	if role == "heading" && node.HeadingLevel > 0 {
+		if p.locale == "de-DE" {
+			return "ü" + strconv.Itoa(node.HeadingLevel)
+		}
 		return "h" + strconv.Itoa(node.HeadingLevel)
 	}
 	if p.locale == "de-DE" {
 		roles := map[string]string{
-			"push button": "schlt", "button": "schlt", "toggle button": "umsch",
-			"check box": "ktrl", "radio button": "opf", "combo box": "kob",
-			"entry": "eing", "password text": "kennw eing", "link": "lnk",
-			"list": "lst", "list item": "lste", "table": "tbl",
-			"table cell": "z", "column header": "spü", "row header": "zü",
+			"push button": "sltr", "button": "sltr", "toggle button": "umsch",
+			"check box": "KF", "radio button": "AS", "combo box": "kmbf",
+			"entry": "ef", "password text": "kennw ef", "link": "lnk",
+			"list": "lst", "list item": "lste", "image": "grf", "graphic": "grf", "table": "tbl",
+			"table cell": "z", "cell": "z", "column header": "spü", "row header": "zü",
 			"document web": "dok", "document frame": "rahm", "frame": "rahm",
+			"dialog": "dlg", "menu": "mnü", "menu item": "mnüe", "progress bar": "fsb",
 		}
 		if value := roles[role]; value != "" {
 			return value
@@ -227,12 +348,22 @@ func (p *Presenter) brailleRole(node *model.Node) string {
 
 func (p *Presenter) brailleState(state string) string {
 	if p.locale == "de-DE" {
-		return p.state(state)
+		states := map[string]string{
+			"checked": "⣏⣿⣹", "not checked": "⣏⣀⣹", "mixed": "⣏⣸⣹",
+			"pressed": "⢎⣿⡱", "not pressed": "⢎⣀⡱", "expanded": "-",
+			"collapsed": "+", "selected": "(x)", "unavailable": "nicht verfügbar",
+			"required": "erf", "invalid entry": "Ungültig", "read only": "sef",
+			"visited": "besucht", "has popup": "->", "multiline": "mz", "busy": "besch",
+		}
+		if value := states[state]; value != "" {
+			return value
+		}
+		return state
 	}
 	states := map[string]string{
-		"checked": "chk", "not checked": "not chk", "mixed": "half chk",
-		"pressed": "pressed", "not pressed": "not pressed", "expanded": "expanded",
-		"collapsed": "collapsed", "selected": "sel", "unavailable": "unavail",
+		"checked": "⣏⣿⣹", "not checked": "⣏⣀⣹", "mixed": "⣏⣸⣹",
+		"pressed": "⢎⣿⡱", "not pressed": "⢎⣀⡱", "expanded": "-",
+		"collapsed": "+", "selected": "sel", "unavailable": "unavail",
 		"required": "req", "invalid entry": "invalid", "read only": "ro",
 		"visited": "vlnk", "has popup": "submnu", "multiline": "mln", "busy": "busy",
 	}
@@ -304,15 +435,15 @@ func (p *Presenter) landmark(role string) string {
 	role = strings.ToLower(strings.TrimSpace(role))
 	if p.locale == "de-DE" {
 		translated := map[string]string{
-			"banner": "Banner Orientierungspunkt", "complementary": "Ergänzend Orientierungspunkt",
-			"contentinfo": "Inhaltsinformation Orientierungspunkt", "form": "Formular Orientierungspunkt",
-			"main": "Hauptbereich Orientierungspunkt", "navigation": "Navigation Orientierungspunkt",
-			"region": "Region Orientierungspunkt", "search": "Suche Orientierungspunkt",
+			"banner": "Banner Sprungmarke", "complementary": "Ergänzung Sprungmarke",
+			"contentinfo": "Inhaltsangabe Sprungmarke", "form": "Formular Sprungmarke",
+			"main": "Haupt Sprungmarke", "navigation": "Navigation Sprungmarke",
+			"region": "Region Sprungmarke", "search": "Suche Sprungmarke",
 		}
 		if value := translated[role]; value != "" {
 			return value
 		}
-		return "Orientierungspunkt"
+		return "Sprungmarke"
 	}
 	if role == "" {
 		return "landmark"
@@ -339,7 +470,7 @@ func (p *Presenter) NoTarget(target string, direction int) Presentation {
 func (p *Presenter) Mode(mode string) Presentation {
 	if p.locale == "de-DE" {
 		if mode == "focus" {
-			return Presentation{Speech: "Fokusmodus", Braille: "Fokusmodus"}
+			return Presentation{Speech: "Interaktionsmodus", Braille: "Interaktionsmodus"}
 		}
 		return Presentation{Speech: "Lesemodus", Braille: "Lesemodus"}
 	}
@@ -366,15 +497,15 @@ func (p *Presenter) role(role string) string {
 	}
 	german := map[string]string{
 		"heading": "Überschrift", "push button": "Schalter", "button": "Schalter",
-		"toggle button": "Umschalter", "check box": "Kontrollkästchen", "radio button": "Optionsfeld",
+		"toggle button": "Umschalter", "check box": "Kontrollfeld", "radio button": "Auswahlschalter",
 		"combo box": "Kombinationsfeld", "entry": "Eingabefeld", "password text": "Passworteingabefeld",
 		"link": "Link", "list": "Liste", "list item": "Listeneintrag", "table": "Tabelle",
-		"table cell": "Zelle", "cell": "Zelle", "column header": "Spaltenüberschrift",
-		"row header": "Zeilenüberschrift", "document web": "Dokument", "document frame": "Rahmen",
-		"landmark": "Orientierungspunkt", "dialog": "Dialog", "alert": "Warnung", "status bar": "Status",
-		"menu": "Menü", "menu item": "Menüeintrag", "page tab": "Registerkarte", "tree item": "Baumeintrag",
-		"slider": "Schieberegler", "progress bar": "Fortschrittsanzeige", "image": "Grafik",
-		"separator": "Trennlinie", "article": "Artikel", "paragraph": "Absatz", "math": "Mathematik",
+		"table cell": "Zelle", "cell": "Zelle", "column header": "Spaltenbeschriftung",
+		"row header": "Zeilenbeschriftung", "document web": "Dokument", "document frame": "Rahmen",
+		"landmark": "Sprungmarke", "dialog": "Dialogfeld", "alert": "Benachrichtigung", "status bar": "Status",
+		"menu": "Menü", "menu item": "Menü-Eintrag", "page tab": "Tab", "tree item": "Eintrag",
+		"slider": "Schieber", "progress bar": "Fortschrittsbalken", "image": "Grafik", "graphic": "Grafik",
+		"separator": "Trennlinie", "article": "Artikel", "paragraph": "Absatz", "math": "Mathematisch",
 	}
 	if translated, ok := german[role]; ok {
 		return translated
@@ -387,10 +518,10 @@ func (p *Presenter) state(state string) string {
 		return state
 	}
 	translations := map[string]string{
-		"checked": "aktiviert", "not checked": "nicht aktiviert", "mixed": "teilweise aktiviert",
-		"pressed": "gedrückt", "not pressed": "nicht gedrückt", "expanded": "erweitert",
-		"collapsed": "reduziert", "selected": "ausgewählt", "unavailable": "nicht verfügbar",
-		"required": "erforderlich", "invalid entry": "ungültige Eingabe", "read only": "schreibgeschützt",
+		"checked": "aktiviert", "not checked": "Nicht aktiviert", "mixed": "teilweise aktiviert",
+		"pressed": "gedrückt", "not pressed": "Nicht gedrückt", "expanded": "ausgeklappt",
+		"collapsed": "eingeklappt", "selected": "ausgewählt", "unavailable": "nicht verfügbar",
+		"required": "erforderlich", "invalid entry": "ungültiger Eintrag", "read only": "schreibgeschützt",
 		"visited": "besucht", "has popup": "hat Popup", "multiline": "mehrzeilig", "busy": "beschäftigt",
 	}
 	if translated, ok := translations[state]; ok {

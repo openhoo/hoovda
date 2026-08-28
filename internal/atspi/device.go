@@ -102,6 +102,14 @@ func listenerGrabs(layout string) []listenerGrab {
 					// HooVDA's virtual modifier, never as an ambient lock toggle.
 					add(shiftLockMask, virtualModifier, false)
 					add(mask|shiftLockMask, key, mask&1 != 0)
+					// XKB can resolve a letter to its uppercase keysym while the
+					// physical Caps Lock key remains down, even when the preemptive
+					// AT-SPI listener consumed the Caps Lock press and therefore
+					// reports no LockMask on the command key. Register both XKB
+					// levels under both possible masks; normalizeEventKey folds the
+					// delivered event string back to the command's lowercase key.
+					add(mask, key, true)
+					add(mask|shiftLockMask, key, true)
 				}
 			}
 		}
@@ -231,6 +239,8 @@ func normalizeEventKey(event DeviceEvent) string {
 			return "space"
 		case "\r", "\n":
 			return "enter"
+		case "caps_lock":
+			return "capslock"
 		case "prior", "page_up":
 			return "pageup"
 		case "next", "page_down":

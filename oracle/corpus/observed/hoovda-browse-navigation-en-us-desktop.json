@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 2,
+  "caseId": "nvda-browse-navigation-en-us-desktop",
+  "source": "HooVDA",
+  "profile": "nvda-web-2026.1.1",
+  "locale": "en-US",
+  "keyboardLayout": "desktop",
+  "steps": [
+    {
+      "command": "nextHeading",
+      "speech": ["Quick Nav Target  heading  level 1"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {
+        "capture": "linux-container-chromium-at-spi",
+        "gesture": "h"
+      }
+    },
+    {
+      "command": "nextParagraph",
+      "speech": ["Hello, world!"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {
+        "capture": "linux-container-chromium-at-spi",
+        "gesture": "p"
+      }
+    },
+    {
+      "command": "nextParagraph",
+      "speech": ["He replied,  That's wonderful."],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "p"}
+    },
+    {
+      "command": "nextParagraph",
+      "speech": ["He replied,  That's wonderful ."],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "p"}
+    },
+    {
+      "command": "nextParagraph",
+      "speech": ["He replied,  That's wonderful.  4"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "p"}
+    },
+    {
+      "command": "nextParagraph",
+      "speech": ["Предложение по-русски."],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "p"}
+    },
+    {
+      "command": "nextParagraph",
+      "speech": ["我不会说中文"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "p"}
+    },
+    {
+      "command": "nextParagraph",
+      "speech": ["Bye-bye, world!"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "p"}
+    },
+    {
+      "command": "nextParagraph",
+      "speech": ["no next text paragraph"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "p"}
+    },
+    {
+      "command": "previousParagraph",
+      "speech": ["我不会说中文"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "shift+p"}
+    },
+    {
+      "command": "previousParagraph",
+      "speech": ["Предложение по-русски."],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "shift+p"}
+    },
+    {
+      "command": "previousParagraph",
+      "speech": ["He replied,  That's wonderful.  4"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "shift+p"}
+    },
+    {
+      "command": "previousParagraph",
+      "speech": ["He replied,  That's wonderful ."],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "shift+p"}
+    },
+    {
+      "command": "previousParagraph",
+      "speech": ["He replied,  That's wonderful."],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "shift+p"}
+    },
+    {
+      "command": "previousParagraph",
+      "speech": ["Hello, world!"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "shift+p"}
+    },
+    {
+      "command": "previousParagraph",
+      "speech": ["no previous text paragraph"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {"capture": "linux-container-chromium-at-spi", "gesture": "shift+p"}
+    }
+  ]
+}

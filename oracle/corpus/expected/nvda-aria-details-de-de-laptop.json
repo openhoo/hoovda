@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "caseId": "nvda-aria-details-de-de-laptop",
+  "source": "NVDA",
+  "profile": "nvda-web-2026.1.1",
+  "locale": "de-DE",
+  "keyboardLayout": "laptop",
+  "steps": [
+    {
+      "command": "nextFocusable",
+      "speech": ["push me  Schalter  Hat Details"],
+      "braille": ["push me sltr Details"],
+      "mode": "focus",
+      "raw": {
+        "upstreamTest": "test_aria_details_noVBufNoTextInterface",
+        "localizationCatalog": "source/locale/de/LC_MESSAGES/nvda.po",
+        "setup": ["focus first button", "clear captured output"],
+        "gesture": "tab"
+      }
+    },
+    {
+      "command": "reportDetails",
+      "speech": ["Press to self-destruct"],
+      "braille": ["Press to self-destruct"],
+      "mode": "focus",
+      "raw": {
+        "upstreamTest": "test_aria_details_noVBufNoTextInterface",
+        "localizationCatalog": "source/locale/de/LC_MESSAGES/nvda.po",
+        "gesture": "NVDA+d"
+      }
+    }
+  ]
+}

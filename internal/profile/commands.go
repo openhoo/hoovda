@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/openhoo/hoovda/internal/model"
 )
@@ -229,7 +230,7 @@ func MatchTarget(target string) func(*model.Node) bool {
 		case "edit":
 			return role == "entry" || role == "password text" || node.HasState("editable")
 		case "textParagraph":
-			return role == "paragraph" || node.Attributes["tag"] == "p"
+			return (role == "paragraph" || node.Attributes["tag"] == "p") && matchesTextParagraph(node.SpokenContent())
 		case "frame":
 			return role == "frame" || role == "document frame"
 		case "separator":
@@ -248,6 +249,49 @@ func MatchTarget(target string) func(*model.Node) bool {
 			return false
 		}
 	}
+}
+
+// matchesTextParagraph implements NVDA 2026.1.1's default text paragraph
+// predicate from source/config/configDefaults.py without regex look-behind.
+func matchesTextParagraph(text string) bool {
+	runes := []rune(text)
+	for index, value := range runes {
+		if strings.ContainsRune("?!．！？：；", value) {
+			return true
+		}
+		if value != '.' && value != '…' {
+			continue
+		}
+		end := index
+		for end+1 < len(runes) && end-index < 2 && (runes[end+1] == '.' || runes[end+1] == '…') {
+			end++
+		}
+		before := index - 1
+		if before >= 0 && strings.ContainsRune("\"”»)", runes[before]) {
+			before--
+		}
+		if before < 0 || (!unicode.IsLetter(runes[before]) && runes[before] != '_') {
+			continue
+		}
+		after := end + 1
+		if after < len(runes) && strings.ContainsRune("\"”»)", runes[after]) {
+			after++
+		}
+		for after < len(runes) && runes[after] == '[' {
+			closing := after + 1
+			for closing < len(runes) && unicode.IsDigit(runes[closing]) {
+				closing++
+			}
+			if closing == after+1 || closing >= len(runes) || runes[closing] != ']' {
+				break
+			}
+			after = closing + 1
+		}
+		if after == len(runes) || unicode.IsSpace(runes[after]) || runes[after] == '\u00a0' {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidateCatalog() error {

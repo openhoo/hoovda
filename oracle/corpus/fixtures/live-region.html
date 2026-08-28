@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en-US">
+<head><meta charset="utf-8"><title>Live region oracle</title></head>
+<body>
+  <button id="update">Update status</button>
+  <div id="status" role="alert"></div>
+  <script>
+    document.querySelector('#update').addEventListener('click', () => {
+      document.querySelector('#status').textContent = 'Order review ready';
+    });
+  </script>
+</body>
+</html>

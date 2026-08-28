@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/openhoo/hoovda/internal/profile"
 )
 
 const SchemaVersion = 2
@@ -22,13 +24,16 @@ var requiredTags = []string{
 }
 
 const (
-	releaseCommit   = "5d92106f17e461dac62aa48257bbbf4183e033d0"
-	captureToolURL  = "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/libraries/SystemTestSpy/speechSpyGlobalPlugin.py"
-	captureToolHash = "1bf6319b2b66896618b34d492b5772846ab55b150613935f4290803945087641"
+	releaseCommit    = "5d92106f17e461dac62aa48257bbbf4183e033d0"
+	captureToolURL   = "https://github.com/nvaccess/nvda/blob/5d92106f17e461dac62aa48257bbbf4183e033d0/tests/system/libraries/SystemTestSpy/speechSpyGlobalPlugin.py"
+	captureToolHash  = "1bf6319b2b66896618b34d492b5772846ab55b150613935f4290803945087641"
+	localizationPath = "source/locale/de/LC_MESSAGES/nvda.po"
+	localizationHash = "f0a8360d9a6723a39f3bafacf56f0d105ea6355c8e1b9eac079fefac3b7e45f8"
 )
 
 var officialReferenceHashes = map[string]string{
 	"tests/system/robot/chromeTests.py": "09988fded0f68cbfa115a4f23fff24073c2b33bcc0a7bab5ec97ac43e231b077",
+	"source/NVDAHelper/__init__.py":     "a9b967a9d0377371dbc83ad5400d5c59f33dfd5b031f1edc9c0249de59467638",
 }
 
 type Manifest struct {
@@ -53,17 +58,27 @@ type Oracle struct {
 }
 
 type Case struct {
-	ID             string    `json:"id"`
-	Locale         string    `json:"locale"`
-	KeyboardLayout string    `json:"keyboardLayout"`
-	Fixture        string    `json:"fixture"`
-	FixtureSHA256  string    `json:"fixtureSha256"`
-	Expected       string    `json:"expected"`
-	ExpectedSHA256 string    `json:"expectedSha256"`
-	Observed       string    `json:"observed"`
-	ObservedSHA256 string    `json:"observedSha256"`
-	Reference      Reference `json:"reference"`
-	Tags           []string  `json:"tags"`
+	ID                   string        `json:"id"`
+	Locale               string        `json:"locale"`
+	KeyboardLayout       string        `json:"keyboardLayout"`
+	Fixture              string        `json:"fixture"`
+	FixtureSHA256        string        `json:"fixtureSha256"`
+	Expected             string        `json:"expected"`
+	ExpectedSHA256       string        `json:"expectedSha256"`
+	Observed             string        `json:"observed"`
+	ObservedSHA256       string        `json:"observedSha256"`
+	Reference            Reference     `json:"reference"`
+	AdditionalReferences []Reference   `json:"additionalReferences,omitempty"`
+	Localization         *Localization `json:"localization,omitempty"`
+	Tags                 []string      `json:"tags"`
+}
+
+type Localization struct {
+	URL      string `json:"url"`
+	Revision string `json:"revision"`
+	Path     string `json:"path"`
+	SHA256   string `json:"sha256"`
+	Locale   string `json:"locale"`
 }
 
 type Reference struct {
@@ -112,6 +127,9 @@ func Check(manifestPath string) (Report, error) {
 		return report, fmt.Errorf("decode manifest: %w", err)
 	}
 	report.Profile, report.Cases = manifest.Profile, len(manifest.Cases)
+	if manifest.Schema != "../schemas/manifest.schema.json" {
+		report.Issues = append(report.Issues, "manifest $schema must pin ../schemas/manifest.schema.json")
+	}
 	if manifest.SchemaVersion != SchemaVersion {
 		report.Issues = append(report.Issues, fmt.Sprintf("schemaVersion must equal %d", SchemaVersion))
 	}
@@ -134,6 +152,10 @@ func Check(manifestPath string) (Report, error) {
 	seenCases := map[string]bool{}
 	seenTags := map[string]bool{}
 	seenMatrices := map[string]bool{}
+	allowedTags := map[string]bool{}
+	for _, tag := range requiredTags {
+		allowedTags[tag] = true
+	}
 	for _, item := range manifest.Cases {
 		if item.ID == "" || seenCases[item.ID] {
 			report.Issues = append(report.Issues, fmt.Sprintf("case id %q is empty or duplicated", item.ID))
@@ -150,7 +172,35 @@ func Check(manifestPath string) (Report, error) {
 		if issue := validateReference(item.Reference, manifest.Oracle.ReleaseCommit); issue != "" {
 			report.Issues = append(report.Issues, item.ID+" reference: "+issue)
 		}
+		seenReferences := map[string]bool{item.Reference.Path + "\x00" + item.Reference.Test: true}
+		for index, reference := range item.AdditionalReferences {
+			if issue := validateReference(reference, manifest.Oracle.ReleaseCommit); issue != "" {
+				report.Issues = append(report.Issues, fmt.Sprintf("%s additional reference %d: %s", item.ID, index+1, issue))
+			}
+			key := reference.Path + "\x00" + reference.Test
+			if seenReferences[key] {
+				report.Issues = append(report.Issues, fmt.Sprintf("%s additional reference %d is duplicated", item.ID, index+1))
+			}
+			seenReferences[key] = true
+		}
+		if issue := validateLocalization(item.Localization, item.Locale, manifest.Oracle.ReleaseCommit); issue != "" {
+			report.Issues = append(report.Issues, item.ID+" localization: "+issue)
+		}
+		caseTags := map[string]bool{}
 		for _, tag := range item.Tags {
+			if !allowedTags[tag] {
+				report.Issues = append(report.Issues, item.ID+" has unknown coverage tag: "+tag)
+				continue
+			}
+			if caseTags[tag] {
+				report.Issues = append(report.Issues, item.ID+" has duplicate coverage tag: "+tag)
+				continue
+			}
+			caseTags[tag] = true
+			if issue := validateCoverageEvidence(tag, append([]Reference{item.Reference}, item.AdditionalReferences...)); issue != "" {
+				report.Issues = append(report.Issues, item.ID+" tag "+tag+": "+issue)
+				continue
+			}
 			seenTags[tag] = true
 		}
 		if err := verifyFile(root, item.Fixture, item.FixtureSHA256, nil); err != nil {
@@ -251,8 +301,8 @@ func decodeStrict(data []byte, decoded any) error {
 	return nil
 }
 
-func validateTrace(trace Trace, item Case, profile, source string) string {
-	if trace.SchemaVersion != SchemaVersion || trace.CaseID != item.ID || trace.Profile != profile || trace.Locale != item.Locale || trace.KeyboardLayout != item.KeyboardLayout {
+func validateTrace(trace Trace, item Case, profileName, source string) string {
+	if trace.SchemaVersion != SchemaVersion || trace.CaseID != item.ID || trace.Profile != profileName || trace.Locale != item.Locale || trace.KeyboardLayout != item.KeyboardLayout {
 		return "trace identity does not match manifest"
 	}
 	if trace.Source != source {
@@ -271,11 +321,63 @@ func validateTrace(trace Trace, item Case, profile, source string) string {
 		}
 		hasSpeech = hasSpeech || len(step.Speech) > 0
 		hasBraille = hasBraille || len(step.Braille) > 0
+		if issue := validateStepEvidence(step, item, source); issue != "" {
+			return fmt.Sprintf("step %d %s", index+1, issue)
+		}
 	}
-	if !hasSpeech || !hasBraille {
-		return "trace must contain both speech and braille evidence"
+	if slices.Contains(item.Tags, "speech") && !hasSpeech {
+		return "trace tagged speech has no speech evidence"
+	}
+	if slices.Contains(item.Tags, "braille") && !hasBraille {
+		return "trace tagged braille has no braille evidence"
 	}
 	return ""
+}
+
+func validateStepEvidence(step TraceStep, item Case, source string) string {
+	if len(step.Raw) == 0 || string(step.Raw) == "null" {
+		return "has no raw evidence"
+	}
+	var evidence map[string]any
+	if err := json.Unmarshal(step.Raw, &evidence); err != nil || evidence == nil {
+		return "raw evidence must be an object"
+	}
+	gesture, ok := evidence["gesture"].(string)
+	if !ok || strings.TrimSpace(gesture) == "" {
+		return "raw evidence has no gesture"
+	}
+	if source == "NVDA" {
+		upstreamTest, ok := evidence["upstreamTest"].(string)
+		if !ok || strings.TrimSpace(upstreamTest) == "" {
+			return "raw NVDA evidence has no upstreamTest"
+		}
+		declared := item.Reference.Test == upstreamTest
+		for _, reference := range item.AdditionalReferences {
+			declared = declared || reference.Test == upstreamTest
+		}
+		if !declared {
+			return "raw NVDA upstreamTest is not declared by the case references"
+		}
+		return ""
+	}
+	if capture, ok := evidence["capture"].(string); !ok || capture != "linux-container-chromium-at-spi" {
+		return "raw HooVDA evidence has invalid capture boundary"
+	}
+	command, ok := profile.CommandByID(step.Command)
+	if !ok {
+		return "uses an unknown HooVDA command"
+	}
+	gestures := command.Desktop
+	if item.KeyboardLayout == "laptop" {
+		gestures = command.Laptop
+	}
+	normalized := profile.NormalizeGesture(gesture)
+	for _, candidate := range gestures {
+		if profile.NormalizeGesture(candidate) == normalized {
+			return ""
+		}
+	}
+	return fmt.Sprintf("gesture %q does not deliver command %q for %s layout", gesture, step.Command, item.KeyboardLayout)
 }
 
 func validateReference(reference Reference, releaseCommit string) string {
@@ -295,6 +397,61 @@ func validateReference(reference Reference, releaseCommit string) string {
 	}
 	if strings.TrimSpace(reference.Test) == "" || strings.TrimSpace(reference.Assertion) == "" {
 		return "test and assertion identities are required"
+	}
+	return ""
+}
+
+func validateCoverageEvidence(tag string, references []Reference) string {
+	matches := func(path, test string) bool {
+		for _, reference := range references {
+			if reference.Path == path && reference.Test == test {
+				return true
+			}
+		}
+		return false
+	}
+	switch tag {
+	case "focus", "focus-mode", "forms":
+		if !matches("tests/system/robot/chromeTests.py", "test_aria_details_noVBufNoTextInterface") {
+			return "requires test_aria_details_noVBufNoTextInterface"
+		}
+	case "browse-mode":
+		if !matches("tests/system/robot/chromeTests.py", "test_quickNavTargetReporting") && !matches("tests/system/robot/chromeTests.py", "test_tableInStyleDisplayTable") {
+			return "requires a pinned Chrome browse-mode navigation assertion"
+		}
+	case "quick-navigation":
+		if !matches("tests/system/robot/chromeTests.py", "test_quickNavTargetReporting") && !matches("tests/system/robot/chromeTests.py", "test_tableInStyleDisplayTable") {
+			return "requires a pinned Chrome quick-navigation assertion"
+		}
+	case "text-navigation":
+		if !matches("tests/system/robot/chromeTests.py", "test_textParagraphNavigation") {
+			return "requires test_textParagraphNavigation"
+		}
+	case "tables":
+		if !matches("tests/system/robot/chromeTests.py", "test_tableInStyleDisplayTable") {
+			return "requires test_tableInStyleDisplayTable"
+		}
+	case "live-region", "dynamic-content":
+		if !matches("source/NVDAHelper/__init__.py", "nvdaControllerInternal_reportLiveRegion") {
+			return "requires nvdaControllerInternal_reportLiveRegion"
+		}
+	}
+	return ""
+}
+
+func validateLocalization(localization *Localization, locale, releaseCommit string) string {
+	if locale == "en-US" {
+		if localization != nil {
+			return "en-US cases must not declare a localization catalog"
+		}
+		return ""
+	}
+	if localization == nil {
+		return "de-DE cases require the pinned official localization catalog"
+	}
+	wantURL := "https://github.com/nvaccess/nvda/blob/" + releaseCommit + "/" + localizationPath
+	if localization.URL != wantURL || localization.Revision != releaseCommit || localization.Path != localizationPath || localization.SHA256 != localizationHash || localization.Locale != "de-DE" {
+		return "catalog identity must match the audited official de-DE source"
 	}
 	return ""
 }

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "caseId": "nvda-table-navigation-en-us-desktop",
+  "source": "NVDA",
+  "profile": "nvda-web-2026.1.1",
+  "locale": "en-US",
+  "keyboardLayout": "desktop",
+  "steps": [
+    {
+      "command": "nextTable",
+      "speech": ["table  with 2 rows and 2 columns  row 1  column 1  First heading"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {
+        "upstreamTest": "test_tableInStyleDisplayTable",
+        "gesture": "t"
+      }
+    },
+    {
+      "command": "nextTableRow",
+      "speech": ["row 2  First content cell"],
+      "braille": [],
+      "mode": "browse",
+      "raw": {
+        "upstreamTest": "test_tableInStyleDisplayTable",
+        "gesture": "control+alt+downArrow"
+      }
+    }
+  ]
+}

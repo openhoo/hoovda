@@ -398,12 +398,36 @@ func (e *Engine) navigate(command profile.Command) error {
 	if ok {
 		e.cursor.Object, e.cursor.Offset = node.ID, 0
 	}
+	var table, tableCell *model.Node
+	if ok && command.Target == "table" {
+		table = node
+		grid, maxRow, maxColumn := tableGrid(graph, node.ID)
+		if command.Direction > 0 {
+			tableCell = firstPositionedCell(grid, maxRow, maxColumn)
+		} else {
+			tableCell = lastPositionedCell(grid, maxRow, maxColumn)
+		}
+		if tableCell != nil {
+			e.cursor.Object = tableCell.ID
+		}
+	}
 	e.mu.Unlock()
 	if !ok {
-		e.emit(e.presenter.NoTarget(command.Target, command.Direction), nil, command.ID, "navigationBoundary", "normal")
+		target := command.Target
+		if target == "textParagraph" {
+			target = "text paragraph"
+		}
+		e.emit(e.presenter.NoTarget(target, command.Direction), nil, command.ID, "navigationBoundary", "normal")
 		return nil
 	}
-	e.emit(e.presenter.Present(node, "quickNavigation"), node, command.ID, "quickNavigation", "normal")
+	presentation := e.presenter.Present(node, "quickNavigation")
+	switch command.Target {
+	case "textParagraph":
+		presentation = e.presenter.PresentTextParagraph(node)
+	case "table":
+		presentation = e.presenter.PresentTableEntry(table, tableCell)
+	}
+	e.emit(presentation, node, command.ID, "quickNavigation", "normal")
 	return nil
 }
 
@@ -614,7 +638,29 @@ func (e *Engine) navigateTable(command profile.Command) error {
 		e.emit(e.presenter.NoTarget("table cell", command.Direction), nil, command.ID, "tableBoundary", "normal")
 		return nil
 	}
-	e.emit(e.presenter.Present(next, "tableNavigation"), next, command.ID, "tableNavigation", "normal")
+	e.emit(e.presenter.PresentTableMove(next, current), next, command.ID, "tableNavigation", "normal")
+	return nil
+}
+
+func firstPositionedCell(grid map[[2]int]*model.Node, maxRow, maxColumn int) *model.Node {
+	for row := 1; row <= maxRow; row++ {
+		for column := 1; column <= maxColumn; column++ {
+			if cell := grid[[2]int{row, column}]; cell != nil {
+				return cell
+			}
+		}
+	}
+	return nil
+}
+
+func lastPositionedCell(grid map[[2]int]*model.Node, maxRow, maxColumn int) *model.Node {
+	for row := maxRow; row >= 1; row-- {
+		for column := maxColumn; column >= 1; column-- {
+			if cell := grid[[2]int{row, column}]; cell != nil {
+				return cell
+			}
+		}
+	}
 	return nil
 }
 
