@@ -230,6 +230,25 @@ func (p *Presenter) presentTableDelta(node, previous *model.Node) Presentation {
 			speechParts = append(speechParts, fmt.Sprintf("spans %d columns", node.ColumnSpan))
 		}
 	}
+	if description := strings.TrimSpace(node.Description); description != "" && description != strings.TrimSpace(node.SpokenContent()) {
+		speechParts = appendDistinct(speechParts, description)
+		brailleParts = appendDistinct(brailleParts, description)
+	}
+	speechParts = appendDistinct(speechParts, node.RelationText["described by"]...)
+	brailleParts = appendDistinct(brailleParts, node.RelationText["described by"]...)
+	if len(node.RelationText["details"]) > 0 {
+		if p.locale == "de-DE" {
+			speechParts = appendDistinct(speechParts, "Hat Details")
+			brailleParts = appendDistinct(brailleParts, "Details")
+		} else {
+			speechParts = appendDistinct(speechParts, "has details")
+			brailleParts = appendDistinct(brailleParts, "details")
+		}
+	}
+	if node.HasState("invalid") {
+		speechParts = appendDistinct(speechParts, node.RelationText["error message"]...)
+		brailleParts = appendDistinct(brailleParts, node.RelationText["error message"]...)
+	}
 	return p.plain(strings.Join(nonEmpty(speechParts), "  "), strings.Join(nonEmpty(brailleParts), " "), node, "tableNavigation")
 }
 

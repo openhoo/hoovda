@@ -130,9 +130,13 @@ func TestTableEntryAndAxisCaching(t *testing.T) {
 	if entry.Speech != "table  with 2 rows and 2 columns  row 1  column 1  First heading" {
 		t.Fatalf("entry = %#v", entry)
 	}
-	second := &model.Node{Role: "table cell", Name: "First content cell", Row: 2, Column: 1, ColumnHeaderText: []string{"First heading"}}
+	second := &model.Node{
+		Role: "table cell", Name: "First content cell", Row: 2, Column: 1,
+		ColumnHeaderText: []string{"First heading"},
+		RelationText:     map[string][]string{"described by": {"Cell help"}},
+	}
 	move := presenter.PresentTableMove(second, first)
-	if move.Speech != "row 2  First content cell" || move.Braille != "r2 First content cell" {
+	if move.Speech != "row 2  First content cell  Cell help" || move.Braille != "r2 First content cell Cell help" {
 		t.Fatalf("move = %#v", move)
 	}
 }
