@@ -554,6 +554,18 @@ func TestExitEmbeddedObjectRequiresFocusOnlyForActualBoundaryExit(t *testing.T) 
 	}
 }
 
+func TestActionResultExcludesEventsMisattributedBeforeCommandStart(t *testing.T) {
+	result := filterActionResultEvents([]events.Event{
+		{Sequence: 10, Kind: events.KindFocus, CausalCommand: "exitEmbeddedObject", Text: "late prior focus"},
+		{Sequence: 11, Kind: events.KindCommandStarted, CausalCommand: "exitEmbeddedObject"},
+		{Sequence: 12, Kind: events.KindCommandSettled, CausalCommand: "exitEmbeddedObject", Reason: "completed"},
+		{Sequence: 13, Kind: events.KindSpeech, CausalCommand: "nextHeading", Text: "unrelated"},
+	}, "exitEmbeddedObject", 11)
+	if len(result) != 2 || result[0].Sequence != 11 || result[1].Sequence != 12 {
+		t.Fatalf("filtered result = %#v", result)
+	}
+}
+
 func stringPointer(value string) *string {
 	return &value
 }

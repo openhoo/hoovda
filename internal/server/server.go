@@ -437,10 +437,14 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "event_cursor", err)
 		return
 	}
-	resultEvents = slices.DeleteFunc(resultEvents, func(event events.Event) bool {
-		return event.CausalCommand != command.ID
-	})
+	resultEvents = filterActionResultEvents(resultEvents, command.ID, startedSequence)
 	writeJSON(w, http.StatusOK, ActionResult{Command: command.ID, Gesture: gesture, Delivery: delivery, BeforeSequence: before, Cursor: cursor, TimedOut: timedOut, Events: resultEvents, State: s.stateResult()})
+}
+
+func filterActionResultEvents(result []events.Event, commandID string, startedSequence uint64) []events.Event {
+	return slices.DeleteFunc(result, func(event events.Event) bool {
+		return event.CausalCommand != commandID || event.Sequence < startedSequence
+	})
 }
 
 func commandNeedsNativeFocus(commandID string, observed []events.Event) bool {
