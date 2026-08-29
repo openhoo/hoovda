@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,11 +35,30 @@ func (f *fakeAccess) ReadNode(_ context.Context, id model.ObjectID) (*model.Node
 	return f.graph.Nodes[id], nil
 }
 func (f *fakeAccess) DoDefaultAction(context.Context, model.ObjectID) error { return nil }
-func (f *fakeAccess) Events() <-chan engine.NativeEvent                     { return f.events }
+func (f *fakeAccess) GrabFocus(context.Context, model.ObjectID) error       { return nil }
+func (f *fakeAccess) SetTextSelection(context.Context, model.ObjectID, int, int) error {
+	return nil
+}
+func (f *fakeAccess) GenerateMouseEvent(context.Context, int, int, string) error { return nil }
+func (f *fakeAccess) Events() <-chan engine.NativeEvent                          { return f.events }
 
 type engineInjector struct{ engine *engine.Engine }
 
 func (i engineInjector) Press(ctx context.Context, gesture string) error {
+	_, err := i.engine.HandleGesture(ctx, gesture)
+	return err
+}
+
+type dropFirstInjector struct {
+	engine *engine.Engine
+	calls  int
+}
+
+func (i *dropFirstInjector) Press(ctx context.Context, gesture string) error {
+	i.calls++
+	if i.calls == 1 {
+		return nil
+	}
 	_, err := i.engine.HandleGesture(ctx, gesture)
 	return err
 }
@@ -54,11 +74,12 @@ type delayedFocusInjector struct {
 }
 
 func (i delayedFocusInjector) Press(_ context.Context, _ string) error {
+	i.store.Append(events.Event{Kind: events.KindFocus, SessionID: i.sessionID, Text: "Address and search bar", Reason: "nativeFocus"})
 	i.store.Append(events.Event{Kind: events.KindCommandStarted, SessionID: i.sessionID, CausalCommand: "nextFocusable", Text: "Next focusable element"})
 	i.store.Append(events.Event{Kind: events.KindCommandSettled, SessionID: i.sessionID, CausalCommand: "nextFocusable", Reason: "completed"})
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		i.store.Append(events.Event{Kind: events.KindFocus, SessionID: i.sessionID, Text: "Email", Reason: "nativeFocus"})
+		i.store.Append(events.Event{Kind: events.KindFocus, SessionID: i.sessionID, CausalCommand: "nextFocusable", Text: "Email", Reason: "nativeFocus"})
 	}()
 	return nil
 }
@@ -74,8 +95,8 @@ func testServer(t *testing.T) *Server {
 	root := model.ObjectID{Bus: "app", Path: "/root"}
 	heading := model.ObjectID{Bus: "app", Path: "/heading"}
 	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
-		root:    {ID: root, Role: "document web", Name: "Fixture", Children: []model.ObjectID{heading}},
-		heading: {ID: heading, Parent: root, Role: "heading", Name: "Checkout", HeadingLevel: 1},
+		root:    {ID: root, Role: "document web", Name: "Fixture", Children: []model.ObjectID{heading}, States: map[string]bool{"enabled": true}},
+		heading: {ID: heading, Parent: root, Role: "heading", Name: "Checkout", HeadingLevel: 1, States: map[string]bool{"enabled": true}},
 	}, 7)
 	if err != nil {
 		t.Fatal(err)
@@ -162,6 +183,186 @@ func TestSessionActionAndArtifacts(t *testing.T) {
 	}
 }
 
+func TestFinishIsIdempotentAfterSuccessfulFinalization(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "finish-retry"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	first := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	second := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("finish statuses = %d, %d; second=%s", first.Code, second.Code, second.Body.String())
+	}
+	var firstResult, secondResult FinishResult
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResult); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondResult); err != nil {
+		t.Fatal(err)
+	}
+	if firstResult.SessionID != secondResult.SessionID || firstResult.Cursor != secondResult.Cursor || len(firstResult.Artifacts) != len(secondResult.Artifacts) {
+		t.Fatalf("finish retry changed result: first=%#v second=%#v", firstResult, secondResult)
+	}
+}
+
+func TestFinishedSessionRetentionRemovesExpiredArtifacts(t *testing.T) {
+	server := testServer(t)
+	server.cfg.FinishedSessionLimit = 1
+	finish := func(testID string) Session {
+		t.Helper()
+		created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: testID}, "test-secret")
+		var session Session
+		if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+			t.Fatal(err)
+		}
+		response := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+		if response.Code != http.StatusOK {
+			t.Fatalf("finish status = %d body=%s", response.Code, response.Body.String())
+		}
+		return session
+	}
+	first := finish("retained-first")
+	server.mu.RLock()
+	firstPath := server.finished[first.ID].artifacts["screenreader-events"].Path
+	server.mu.RUnlock()
+	second := finish("retained-second")
+	if first.ID == second.ID {
+		t.Fatal("random session IDs collided")
+	}
+	if response := request(t, server, http.MethodGet, "/v2/sessions/"+first.ID+"/artifacts/screenreader-events", nil, "test-secret"); response.Code != http.StatusNotFound {
+		t.Fatalf("expired artifact status = %d", response.Code)
+	}
+	if _, err := os.Stat(filepath.Dir(firstPath)); !os.IsNotExist(err) {
+		t.Fatalf("expired artifact directory still exists: %v", err)
+	}
+}
+
+func TestFinishExportFailureDoesNotPoisonNextSession(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "truncated"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 1001; index++ {
+		server.store.Append(events.Event{Kind: events.KindSpeech, SessionID: session.ID, Text: "overflow"})
+	}
+	failed := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if failed.Code != http.StatusInternalServerError || !bytes.Contains(failed.Body.Bytes(), []byte(`"code":"event_export"`)) {
+		t.Fatalf("finish status = %d body=%s", failed.Code, failed.Body.String())
+	}
+	next := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "after-failure"}, "test-secret")
+	if next.Code != http.StatusCreated {
+		t.Fatalf("next session status = %d body=%s", next.Code, next.Body.String())
+	}
+}
+
+func TestStateReturnsEnrichedRuntimeObjects(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "state"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/state", nil, "test-secret")
+	if response.Code != http.StatusOK {
+		t.Fatalf("state status = %d body=%s", response.Code, response.Body.String())
+	}
+	var state StateResult
+	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Navigator == nil || state.Navigator.Name == nil || *state.Navigator.Name != "Fixture" || state.Navigator.Role == nil || *state.Navigator.Role != "document web" {
+		t.Fatalf("navigator = %#v body=%s", state.Navigator, response.Body.String())
+	}
+	if state.Browse == nil || state.Browse.ID == "" || state.Browse.Role == nil || *state.Browse.Role != "document web" {
+		t.Fatalf("browse = %#v body=%s", state.Browse, response.Body.String())
+	}
+}
+
+func TestRuntimeObjectDoesNotExposeProtectedValue(t *testing.T) {
+	node := &model.Node{
+		ID:        model.ObjectID{Bus: "app", Path: "/password"},
+		Role:      "password text",
+		Name:      "Password",
+		ValueText: "DO_NOT_LEAK",
+		States:    map[string]bool{"protected": true},
+	}
+	result := runtimeObject(node)
+	if result == nil || !result.Redacted || result.Name != nil {
+		t.Fatalf("protected runtime object = %#v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("DO_NOT_LEAK")) || bytes.Contains(encoded, []byte("Password")) {
+		t.Fatalf("protected runtime object leaked content: %s", encoded)
+	}
+}
+
+func TestSessionPresentationSettingsAreStrictScopedAndRecorded(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "settings"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	settingsResponse := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/settings", nil, "test-secret")
+	if settingsResponse.Code != http.StatusOK {
+		t.Fatalf("settings status = %d body=%s", settingsResponse.Code, settingsResponse.Body.String())
+	}
+	var baseline profile.PresentationSettings
+	if err := json.Unmarshal(settingsResponse.Body.Bytes(), &baseline); err != nil {
+		t.Fatal(err)
+	}
+	changed := baseline.Clone()
+	changed.ReportHeadings = false
+	changed.BrailleTether = profile.BrailleTetherReview
+	set := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/settings", changed, "test-secret")
+	if set.Code != http.StatusOK || !bytes.Contains(set.Body.Bytes(), []byte(`"reportHeadings":false`)) {
+		t.Fatalf("set status = %d body=%s", set.Code, set.Body.String())
+	}
+	if state := server.engine.State(); state.BrailleTether != "review" {
+		t.Fatalf("braille tether = %q", state.BrailleTether)
+	}
+	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "nextHeading"}, "test-secret")
+	if action.Code != http.StatusOK || !bytes.Contains(action.Body.Bytes(), []byte(`"text":"Checkout"`)) || bytes.Contains(action.Body.Bytes(), []byte(`Checkout  heading`)) {
+		t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+	}
+
+	invalid := map[string]any{"speechSymbolLevel": "some"}
+	rejected := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/settings", invalid, "test-secret")
+	if rejected.Code != http.StatusBadRequest || !bytes.Contains(rejected.Body.Bytes(), []byte(`"code":"invalid_settings"`)) {
+		t.Fatalf("invalid status = %d body=%s", rejected.Code, rejected.Body.String())
+	}
+	reset := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/settings/reset", struct{}{}, "test-secret")
+	if reset.Code != http.StatusOK || !bytes.Contains(reset.Body.Bytes(), []byte(`"reportHeadings":true`)) {
+		t.Fatalf("reset status = %d body=%s", reset.Code, reset.Body.String())
+	}
+	if state := server.engine.State(); state.BrailleTether != "auto" {
+		t.Fatalf("reset braille tether = %q", state.BrailleTether)
+	}
+
+	set = request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/settings", changed, "test-secret")
+	if set.Code != http.StatusOK {
+		t.Fatalf("second set status = %d body=%s", set.Code, set.Body.String())
+	}
+	finished := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if finished.Code != http.StatusOK {
+		t.Fatalf("finish status = %d body=%s", finished.Code, finished.Body.String())
+	}
+	if got := server.engine.PresentationSettings(); !got.ReportHeadings || got.BrailleTether != profile.BrailleTetherAuto {
+		t.Fatalf("settings leaked after session: %#v", got)
+	}
+	artifact := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/artifacts/screenreader-events", nil, "test-secret")
+	if artifact.Code != http.StatusOK || !bytes.Contains(artifact.Body.Bytes(), []byte(`"presentationSettings"`)) || !bytes.Contains(artifact.Body.Bytes(), []byte(`"reportHeadings": false`)) {
+		t.Fatalf("artifact status=%d body=%s", artifact.Code, artifact.Body.String())
+	}
+}
+
 func TestActionReturnsGatewayTimeoutWhenCommandSettlesWithFailure(t *testing.T) {
 	server := testServer(t)
 	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "checkout"}, "test-secret")
@@ -176,6 +377,21 @@ func TestActionReturnsGatewayTimeoutWhenCommandSettlesWithFailure(t *testing.T) 
 	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "nextHeading"}, "test-secret")
 	if action.Code != http.StatusGatewayTimeout || !bytes.Contains(action.Body.Bytes(), []byte(`"code":"command_failed"`)) {
 		t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+	}
+}
+
+func TestPhysicalActionRetriesOnceWhenKeyWasNotObserved(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "key-retry"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	injector := &dropFirstInjector{engine: server.engine}
+	server.injector = injector
+	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "escape"}, "test-secret")
+	if action.Code != http.StatusOK || injector.calls != 2 {
+		t.Fatalf("action status=%d calls=%d body=%s", action.Code, injector.calls, action.Body.String())
 	}
 }
 
@@ -198,6 +414,9 @@ func TestFocusableActionWaitsForDelayedNativeFocus(t *testing.T) {
 	focused := false
 	for _, event := range result.Events {
 		focused = focused || event.Kind == events.KindFocus
+		if event.CausalCommand != "nextFocusable" {
+			t.Fatalf("unrelated event leaked into action result: %#v", event)
+		}
 	}
 	if !focused {
 		t.Fatalf("delayed native focus missing from result: %#v", result.Events)
@@ -236,6 +455,26 @@ func TestStructuredFindActionReturnsEvidence(t *testing.T) {
 	}
 }
 
+func TestUnassignedQuickNavigationUsesStructuredDelivery(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "direct-quick-nav"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "nextArticle"}, "test-secret")
+	if action.Code != http.StatusOK {
+		t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+	}
+	var result ActionResult
+	if err := json.Unmarshal(action.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Delivery != "structured" || result.Gesture != "script:nextArticle" || len(result.Events) == 0 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestFindRequiresBoundedStructuredArgument(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -271,6 +510,21 @@ func TestNonFindActionRejectsStructuredArgument(t *testing.T) {
 	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "nextHeading", Argument: &argument}, "test-secret")
 	if action.Code != http.StatusBadRequest || !bytes.Contains(action.Body.Bytes(), []byte(`"code":"invalid_argument"`)) {
 		t.Fatalf("action status = %d body=%s", action.Code, action.Body.String())
+	}
+}
+
+func TestExitEmbeddedObjectRequiresFocusOnlyForActualBoundaryExit(t *testing.T) {
+	if commandNeedsNativeFocus("exitEmbeddedObject", nil) {
+		t.Fatal("ordinary iframe no-op must not wait for an impossible focus event")
+	}
+	observed := []events.Event{{
+		Kind: events.KindSpeech, CausalCommand: "exitEmbeddedObject", Reason: "embeddedObjectExit",
+	}}
+	if !commandNeedsNativeFocus("exitEmbeddedObject", observed) {
+		t.Fatal("actual embedded-object exit must retain native focus proof")
+	}
+	if !commandNeedsNativeFocus("nextFocusable", nil) {
+		t.Fatal("focus traversal must always retain native focus proof")
 	}
 }
 

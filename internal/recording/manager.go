@@ -151,7 +151,17 @@ func (m *Manager) WriteJSON(sessionID, name string, value []byte) (Artifact, err
 		return Artifact{}, err
 	}
 	s.mu.Lock()
-	s.extras = append(s.extras, artifact)
+	replaced := false
+	for index := range s.extras {
+		if s.extras[index].Name == artifact.Name {
+			s.extras[index] = artifact
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.extras = append(s.extras, artifact)
+	}
 	s.mu.Unlock()
 	return artifact, nil
 }
@@ -285,4 +295,22 @@ func (m *Manager) ResolveArtifact(sessionID, name string) (string, error) {
 		return "", errors.New("artifact path escapes session")
 	}
 	return path, nil
+}
+
+func (m *Manager) RemoveArtifacts(sessionID string) error {
+	if sessionID == "" || filepath.Base(sessionID) != sessionID || sessionID == "." {
+		return errors.New("invalid recording session id")
+	}
+	m.mu.Lock()
+	_, active := m.sessions[sessionID]
+	m.mu.Unlock()
+	if active {
+		return errors.New("recording session is active")
+	}
+	root := filepath.Clean(m.cfg.Root)
+	dir := filepath.Clean(filepath.Join(root, sessionID))
+	if filepath.Dir(dir) != root {
+		return errors.New("recording session path escapes root")
+	}
+	return os.RemoveAll(dir)
 }

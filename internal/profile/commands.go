@@ -91,6 +91,30 @@ var commands = []Command{
 	quick("previousSpellingError", "Previous spelling or grammar error", "shift+w", "error", -1),
 	quick("nextNotLinkBlock", "Next text after block of links", "n", "notLinkBlock", 1),
 	quick("previousNotLinkBlock", "Previous text after block of links", "shift+n", "notLinkBlock", -1),
+	directQuick("nextArticle", "Next article", "article", 1),
+	directQuick("previousArticle", "Previous article", "article", -1),
+	directQuick("nextFigure", "Next figure", "figure", 1),
+	directQuick("previousFigure", "Previous figure", "figure", -1),
+	directQuick("nextGrouping", "Next grouping", "grouping", 1),
+	directQuick("previousGrouping", "Previous grouping", "grouping", -1),
+	directQuick("nextTab", "Next tab", "tab", 1),
+	directQuick("previousTab", "Previous tab", "tab", -1),
+	directQuick("nextMenuItem", "Next menu item", "menuItem", 1),
+	directQuick("previousMenuItem", "Previous menu item", "menuItem", -1),
+	directQuick("nextToggleButton", "Next toggle button", "toggleButton", 1),
+	directQuick("previousToggleButton", "Previous toggle button", "toggleButton", -1),
+	directQuick("nextProgressBar", "Next progress bar", "progressBar", 1),
+	directQuick("previousProgressBar", "Previous progress bar", "progressBar", -1),
+	directQuick("nextReference", "Next reference", "reference", 1),
+	directQuick("previousReference", "Previous reference", "reference", -1),
+	directQuick("nextMathFormula", "Next math formula", "math", 1),
+	directQuick("previousMathFormula", "Previous math formula", "math", -1),
+	directQuick("nextVerticalParagraph", "Next vertically aligned paragraph", "verticalParagraph", 1),
+	directQuick("previousVerticalParagraph", "Previous vertically aligned paragraph", "verticalParagraph", -1),
+	directQuick("nextSameStyle", "Next same style text", "sameStyle", 1),
+	directQuick("previousSameStyle", "Previous same style text", "sameStyle", -1),
+	directQuick("nextDifferentStyle", "Next different style text", "differentStyle", 1),
+	directQuick("previousDifferentStyle", "Previous different style text", "differentStyle", -1),
 	{ID: "nextCharacter", Label: "Next character", Desktop: []string{"right"}, Laptop: []string{"right"}, Category: "text", Direction: 1, ConsumesBrowse: true},
 	{ID: "previousCharacter", Label: "Previous character", Desktop: []string{"left"}, Laptop: []string{"left"}, Category: "text", Direction: -1, ConsumesBrowse: true},
 	{ID: "nextWord", Label: "Next word", Desktop: []string{"ctrl+right"}, Laptop: []string{"ctrl+right"}, Category: "text", Direction: 1, ConsumesBrowse: true},
@@ -101,6 +125,11 @@ var commands = []Command{
 	{ID: "previousParagraphText", Label: "Previous paragraph by text", Desktop: []string{"ctrl+up"}, Laptop: []string{"ctrl+up"}, Category: "text", Direction: -1, ConsumesBrowse: true},
 	{ID: "documentStart", Label: "Start of document", Desktop: []string{"ctrl+home"}, Laptop: []string{"ctrl+home"}, Category: "text", Direction: -1, ConsumesBrowse: true},
 	{ID: "documentEnd", Label: "End of document", Desktop: []string{"ctrl+end"}, Laptop: []string{"ctrl+end"}, Category: "text", Direction: 1, ConsumesBrowse: true},
+	{ID: "moveToContainerStart", Label: "Move to start of containing element", Desktop: []string{"shift+,"}, Laptop: []string{"shift+,"}, Category: "browseDocument", Direction: -1, ConsumesBrowse: true},
+	{ID: "movePastContainerEnd", Label: "Move past end of containing element", Desktop: []string{","}, Laptop: []string{","}, Category: "browseDocument", Direction: 1, ConsumesBrowse: true},
+	{ID: "refreshBrowseDocument", Label: "Refresh browse-mode document", Desktop: []string{"insert+f5"}, Laptop: []string{"capslock+f5"}, Category: "browseDocument", ConsumesBrowse: true},
+	{ID: "exitEmbeddedObject", Label: "Exit current embedded object", Desktop: []string{"insert+ctrl+space"}, Laptop: []string{"capslock+ctrl+space"}, Category: "browseDocument", ConsumesBrowse: true},
+	{ID: "toggleNativeSelection", Label: "Toggle native selection mode", Desktop: []string{"insert+shift+f10"}, Laptop: []string{"capslock+shift+f10"}, Category: "browseDocument", ConsumesBrowse: true},
 	{ID: "previousTableColumn", Label: "Previous table column", Desktop: []string{"ctrl+alt+left"}, Laptop: []string{"ctrl+alt+left"}, Category: "table", Direction: -1, ConsumesBrowse: true},
 	{ID: "nextTableColumn", Label: "Next table column", Desktop: []string{"ctrl+alt+right"}, Laptop: []string{"ctrl+alt+right"}, Category: "table", Direction: 1, ConsumesBrowse: true},
 	{ID: "previousTableRow", Label: "Previous table row", Desktop: []string{"ctrl+alt+up"}, Laptop: []string{"ctrl+alt+up"}, Category: "table", Direction: -1, ConsumesBrowse: true},
@@ -112,6 +141,70 @@ var commands = []Command{
 	{ID: "readCurrent", Label: "Read current location", Desktop: []string{"insert+tab"}, Laptop: []string{"capslock+tab"}, Category: "report", ConsumesBrowse: true},
 	{ID: "reportDetails", Label: "Report details", Desktop: []string{"insert+d"}, Laptop: []string{"capslock+d"}, Category: "report", ConsumesBrowse: true},
 	{ID: "sayAll", Label: "Read from current location", Desktop: []string{"insert+down"}, Laptop: []string{"capslock+a"}, Category: "report", ConsumesBrowse: true},
+	{ID: "reportTitle", Label: "Report window title", Desktop: []string{"insert+t"}, Laptop: []string{"capslock+t"}, Category: "report", ConsumesBrowse: true},
+	{ID: "readActiveWindow", Label: "Read active window", Desktop: []string{"insert+b"}, Laptop: []string{"capslock+b"}, Category: "report", ConsumesBrowse: true},
+	{ID: "reportShortcutKey", Label: "Report focused element shortcut key", Desktop: []string{"shift+numpad2"}, Laptop: []string{"capslock+ctrl+shift+."}, Category: "report", ConsumesBrowse: true},
+	{ID: "reportCurrentLine", Label: "Report current line", Desktop: []string{"insert+up"}, Laptop: []string{"capslock+l"}, Category: "report", ConsumesBrowse: true},
+	{ID: "reportTextSelection", Label: "Report current text selection", Desktop: []string{"insert+shift+up"}, Laptop: []string{"capslock+shift+s"}, Category: "report", ConsumesBrowse: true},
+	{ID: "reportTextFormatting", Label: "Report text formatting at caret", Desktop: []string{"insert+f"}, Laptop: []string{"capslock+f"}, Category: "report", ConsumesBrowse: true},
+	{ID: "reportLanguage", Label: "Report language at caret", Category: "report", ConsumesBrowse: true},
+	{ID: "reportLinkDestination", Label: "Report link destination", Desktop: []string{"insert+k"}, Laptop: []string{"capslock+k"}, Category: "report", ConsumesBrowse: true},
+	{ID: "reportCaretLocation", Label: "Report caret location", Category: "report", ConsumesBrowse: true},
+	{ID: "sayAllTableColumn", Label: "Read table column from current cell", Desktop: []string{"insert+ctrl+alt+down"}, Laptop: []string{"capslock+ctrl+alt+down"}, Category: "tableReport", Direction: 1, Target: "column", ConsumesBrowse: true},
+	{ID: "sayAllTableRow", Label: "Read table row from current cell", Desktop: []string{"insert+ctrl+alt+right"}, Laptop: []string{"capslock+ctrl+alt+right"}, Category: "tableReport", Direction: 1, Target: "row", ConsumesBrowse: true},
+	{ID: "readTableColumn", Label: "Read complete table column", Desktop: []string{"insert+ctrl+alt+up"}, Laptop: []string{"capslock+ctrl+alt+up"}, Category: "tableReport", Target: "column", ConsumesBrowse: true},
+	{ID: "readTableRow", Label: "Read complete table row", Desktop: []string{"insert+ctrl+alt+left"}, Laptop: []string{"capslock+ctrl+alt+left"}, Category: "tableReport", Target: "row", ConsumesBrowse: true},
+	{ID: "reportCurrentObject", Label: "Report current navigator object", Desktop: []string{"insert+numpad5"}, Laptop: []string{"capslock+shift+o"}, Category: "object", ConsumesBrowse: true},
+	{ID: "moveToContainingObject", Label: "Move to containing object", Desktop: []string{"insert+numpad8"}, Laptop: []string{"capslock+shift+up"}, Category: "object", ConsumesBrowse: true},
+	{ID: "moveToPreviousObject", Label: "Move to previous sibling object", Desktop: []string{"insert+numpad4"}, Laptop: []string{"capslock+shift+left"}, Category: "object", Direction: -1, ConsumesBrowse: true},
+	{ID: "moveToPreviousObjectFlat", Label: "Move to previous object in flattened view", Desktop: []string{"insert+numpad9"}, Laptop: []string{"capslock+shift+["}, Category: "object", Direction: -1, ConsumesBrowse: true},
+	{ID: "moveToNextObject", Label: "Move to next sibling object", Desktop: []string{"insert+numpad6"}, Laptop: []string{"capslock+shift+right"}, Category: "object", Direction: 1, ConsumesBrowse: true},
+	{ID: "moveToNextObjectFlat", Label: "Move to next object in flattened view", Desktop: []string{"insert+numpad3"}, Laptop: []string{"capslock+shift+]"}, Category: "object", Direction: 1, ConsumesBrowse: true},
+	{ID: "moveToFirstContainedObject", Label: "Move to first contained object", Desktop: []string{"insert+numpad2"}, Laptop: []string{"capslock+shift+down"}, Category: "object", ConsumesBrowse: true},
+	{ID: "moveToFocusObject", Label: "Move navigator object to focus", Desktop: []string{"insert+numpadminus"}, Laptop: []string{"capslock+backspace"}, Category: "object", ConsumesBrowse: true},
+	{ID: "activateNavigatorObject", Label: "Activate navigator object", Desktop: []string{"insert+numpadenter"}, Laptop: []string{"capslock+enter"}, Category: "object", ConsumesBrowse: true},
+	{ID: "moveFocusToReviewPosition", Label: "Move focus to review position", Desktop: []string{"insert+shift+numpadminus"}, Laptop: []string{"capslock+shift+backspace"}, Category: "object", ConsumesBrowse: true},
+	{ID: "reportReviewLocation", Label: "Report review cursor location", Desktop: []string{"insert+shift+numpaddelete"}, Laptop: []string{"capslock+shift+delete"}, Category: "object", ConsumesBrowse: true},
+	{ID: "reviewTopLine", Label: "Move review cursor to top line", Desktop: []string{"shift+numpad7"}, Laptop: []string{"capslock+ctrl+home"}, Category: "review", ConsumesBrowse: true},
+	{ID: "reviewPreviousLine", Label: "Move review cursor to previous line", Desktop: []string{"numpad7"}, Laptop: []string{"capslock+up"}, Category: "review", Direction: -1, Target: "line", ConsumesBrowse: true},
+	{ID: "reviewCurrentLine", Label: "Report current review line", Desktop: []string{"numpad8"}, Laptop: []string{"capslock+shift+."}, Category: "review", Target: "line", ConsumesBrowse: true},
+	{ID: "reviewNextLine", Label: "Move review cursor to next line", Desktop: []string{"numpad9"}, Laptop: []string{"capslock+down"}, Category: "review", Direction: 1, Target: "line", ConsumesBrowse: true},
+	{ID: "reviewBottomLine", Label: "Move review cursor to bottom line", Desktop: []string{"shift+numpad9"}, Laptop: []string{"capslock+ctrl+end"}, Category: "review", ConsumesBrowse: true},
+	{ID: "reviewPreviousWord", Label: "Move review cursor to previous word", Desktop: []string{"numpad4"}, Laptop: []string{"capslock+ctrl+left"}, Category: "review", Direction: -1, Target: "word", ConsumesBrowse: true},
+	{ID: "reviewCurrentWord", Label: "Report current review word", Desktop: []string{"numpad5"}, Laptop: []string{"capslock+ctrl+."}, Category: "review", Target: "word", ConsumesBrowse: true},
+	{ID: "reviewNextWord", Label: "Move review cursor to next word", Desktop: []string{"numpad6"}, Laptop: []string{"capslock+ctrl+right"}, Category: "review", Direction: 1, Target: "word", ConsumesBrowse: true},
+	{ID: "reviewLineStart", Label: "Move review cursor to line start", Desktop: []string{"shift+numpad1"}, Laptop: []string{"capslock+home"}, Category: "review", ConsumesBrowse: true},
+	{ID: "reviewPreviousCharacter", Label: "Move review cursor to previous character", Desktop: []string{"numpad1"}, Laptop: []string{"capslock+left"}, Category: "review", Direction: -1, Target: "character", ConsumesBrowse: true},
+	{ID: "reviewCurrentCharacter", Label: "Report current review character", Desktop: []string{"numpad2"}, Laptop: []string{"capslock+."}, Category: "review", Target: "character", ConsumesBrowse: true},
+	{ID: "reviewNextCharacter", Label: "Move review cursor to next character", Desktop: []string{"numpad3"}, Laptop: []string{"capslock+right"}, Category: "review", Direction: 1, Target: "character", ConsumesBrowse: true},
+	{ID: "reviewLineEnd", Label: "Move review cursor to line end", Desktop: []string{"shift+numpad3"}, Laptop: []string{"capslock+end"}, Category: "review", ConsumesBrowse: true},
+	{ID: "reviewPreviousPage", Label: "Move review cursor to previous page", Desktop: []string{"insert+pageup"}, Laptop: []string{"capslock+shift+pageup"}, Category: "review", Direction: -1, Target: "page", ConsumesBrowse: true},
+	{ID: "reviewNextPage", Label: "Move review cursor to next page", Desktop: []string{"insert+pagedown"}, Laptop: []string{"capslock+shift+pagedown"}, Category: "review", Direction: 1, Target: "page", ConsumesBrowse: true},
+	{ID: "reviewSelectionStart", Label: "Move review cursor to selection start", Desktop: []string{"insert+alt+home"}, Laptop: []string{"capslock+alt+home"}, Category: "review", Direction: -1, Target: "selection", ConsumesBrowse: true},
+	{ID: "reviewSelectionEnd", Label: "Move review cursor to selection end", Desktop: []string{"insert+alt+end"}, Laptop: []string{"capslock+alt+end"}, Category: "review", Direction: 1, Target: "selection", ConsumesBrowse: true},
+	{ID: "sayAllReview", Label: "Read from review cursor", Desktop: []string{"numpadplus"}, Laptop: []string{"capslock+shift+a"}, Category: "review", ConsumesBrowse: true},
+	{ID: "setReviewCopyStart", Label: "Mark review copy start", Desktop: []string{"insert+f9"}, Laptop: []string{"capslock+f9"}, Category: "review", ConsumesBrowse: true},
+	{ID: "copyToReviewPosition", Label: "Select text through review position", Desktop: []string{"insert+f10"}, Laptop: []string{"capslock+f10"}, Category: "review", ConsumesBrowse: true},
+	{ID: "moveToReviewCopyStart", Label: "Move review cursor to copy start", Desktop: []string{"insert+shift+f9"}, Laptop: []string{"capslock+shift+f9"}, Category: "review", ConsumesBrowse: true},
+	{ID: "reportReviewFormatting", Label: "Report formatting at review cursor", Desktop: []string{"insert+shift+f"}, Laptop: []string{"capslock+shift+f"}, Category: "review", ConsumesBrowse: true},
+	{ID: "nextReviewMode", Label: "Switch to next review mode", Desktop: []string{"insert+numpad7"}, Laptop: []string{"capslock+pageup"}, Category: "review", Direction: 1, Target: "mode", ConsumesBrowse: true},
+	{ID: "previousReviewMode", Label: "Switch to previous review mode", Desktop: []string{"insert+numpad1"}, Laptop: []string{"capslock+pagedown"}, Category: "review", Direction: -1, Target: "mode", ConsumesBrowse: true},
+	{ID: "leftMouseClick", Label: "Click left mouse button", Desktop: []string{"numpaddivide"}, Laptop: []string{"capslock+["}, Category: "mouse", ConsumesBrowse: true},
+	{ID: "leftMouseLock", Label: "Toggle left mouse button lock", Desktop: []string{"shift+numpaddivide"}, Laptop: []string{"capslock+ctrl+["}, Category: "mouse", ConsumesBrowse: true},
+	{ID: "rightMouseClick", Label: "Click right mouse button", Desktop: []string{"numpadmultiply"}, Laptop: []string{"capslock+]"}, Category: "mouse", ConsumesBrowse: true},
+	{ID: "rightMouseLock", Label: "Toggle right mouse button lock", Desktop: []string{"shift+numpadmultiply"}, Laptop: []string{"capslock+ctrl+]"}, Category: "mouse", ConsumesBrowse: true},
+	{ID: "moveMouseToNavigatorObject", Label: "Move mouse to navigator object", Desktop: []string{"insert+numpaddivide"}, Laptop: []string{"capslock+shift+m"}, Category: "mouse", ConsumesBrowse: true},
+	{ID: "moveNavigatorToMouseObject", Label: "Move navigator object to mouse object", Desktop: []string{"insert+numpadmultiply"}, Laptop: []string{"capslock+shift+n"}, Category: "mouse", ConsumesBrowse: true},
+	{ID: "stopSpeech", Label: "Stop speech", Category: "speechControl", ConsumesBrowse: true},
+	{ID: "pauseSpeech", Label: "Pause or resume speech", Category: "speechControl", ConsumesBrowse: true},
+	{ID: "cycleSpeechMode", Label: "Cycle speech mode", Desktop: []string{"insert+s"}, Laptop: []string{"capslock+s"}, Category: "speechControl", ConsumesBrowse: true},
+	{ID: "braillePanBack", Label: "Pan braille display back", Category: "brailleControl", Direction: -1, ConsumesBrowse: true},
+	{ID: "braillePanForward", Label: "Pan braille display forward", Category: "brailleControl", Direction: 1, ConsumesBrowse: true},
+	{ID: "braillePreviousLine", Label: "Move braille display to previous line", Category: "brailleControl", Direction: -1, Target: "line", ConsumesBrowse: true},
+	{ID: "brailleNextLine", Label: "Move braille display to next line", Category: "brailleControl", Direction: 1, Target: "line", ConsumesBrowse: true},
+	{ID: "brailleRoute", Label: "Route braille cell", Category: "brailleControl", Target: "route", ConsumesBrowse: true},
+	{ID: "brailleToggleTether", Label: "Toggle braille tether", Desktop: []string{"insert+ctrl+t"}, Laptop: []string{"capslock+ctrl+t"}, Category: "brailleControl", Target: "tether", ConsumesBrowse: true},
+	{ID: "brailleReportFormatting", Label: "Report formatting at braille cell", Category: "brailleControl", Target: "formatting", ConsumesBrowse: true},
 	{ID: "toggleFocusMode", Label: "Toggle browse or focus mode", Desktop: []string{"insert+space"}, Laptop: []string{"capslock+space"}, Category: "mode", ConsumesBrowse: true},
 	{ID: "toggleSingleLetterNavigation", Label: "Toggle single letter navigation", Desktop: []string{"insert+shift+space"}, Laptop: []string{"capslock+shift+space"}, Category: "mode", ConsumesBrowse: true},
 	{ID: "elementsList", Label: "Elements list", Desktop: []string{"insert+f7"}, Laptop: []string{"capslock+f7"}, Category: "dialog", ConsumesBrowse: true},
@@ -122,6 +215,10 @@ var commands = []Command{
 
 func quick(id, label, gesture, target string, direction int) Command {
 	return Command{ID: id, Label: label, Desktop: []string{gesture}, Laptop: []string{gesture}, Category: "quickNavigation", Target: target, Direction: direction, ConsumesBrowse: true}
+}
+
+func directQuick(id, label, target string, direction int) Command {
+	return Command{ID: id, Label: label, Category: "quickNavigation", Target: target, Direction: direction, ConsumesBrowse: true}
 }
 
 func Commands() []Command {
@@ -136,6 +233,18 @@ func SupportedCommands() []Command {
 
 func SupportedCommandByID(id string) (Command, bool) {
 	return CommandByID(id)
+}
+
+func CommandNeedsGraph(command Command) bool {
+	if command.ID == "brailleToggleTether" {
+		return false
+	}
+	switch command.Category {
+	case "quickNavigation", "text", "activation", "report", "table", "tableReport", "dialog", "browseDocument", "object", "review", "mouse", "brailleControl":
+		return true
+	default:
+		return false
+	}
 }
 
 func CommandByID(id string) (Command, bool) {
@@ -188,6 +297,9 @@ func NormalizeGesture(gesture string) string {
 func MatchTarget(target string) func(*model.Node) bool {
 	return func(node *model.Node) bool {
 		role := strings.ToLower(node.Role)
+		tag := strings.ToLower(node.Attributes["tag"])
+		xmlRoles := strings.Fields(strings.ToLower(node.Attributes["xml-roles"]))
+		hasXMLRole := func(value string) bool { return slices.Contains(xmlRoles, value) }
 		switch target {
 		case "heading":
 			return role == "heading"
@@ -206,7 +318,7 @@ func MatchTarget(target string) func(*model.Node) bool {
 		case "button":
 			return role == "push button" || role == "toggle button" || role == "button"
 		case "formField":
-			return slices.Contains([]string{"entry", "password text", "check box", "radio button", "combo box", "spin button", "slider", "button", "push button", "toggle button"}, role)
+			return slices.Contains([]string{"entry", "password text", "check box", "radio button", "combo box", "spin button", "slider", "button", "push button", "toggle button", "page tab", "menu item"}, role)
 		case "link":
 			return strings.Contains(role, "link")
 		case "visitedLink":
@@ -230,7 +342,15 @@ func MatchTarget(target string) func(*model.Node) bool {
 		case "edit":
 			return role == "entry" || role == "password text" || node.HasState("editable")
 		case "textParagraph":
-			return (role == "paragraph" || node.Attributes["tag"] == "p") && matchesTextParagraph(node.SpokenContent())
+			text := strings.TrimSpace(strings.ReplaceAll(node.Text, "\ufffc", ""))
+			// Chromium exposes an aria-labelledby article's accessible name as
+			// SpokenContent while its own Text buffer contains only embedded-object
+			// markers. NVDA paragraph quick navigation must not treat that label as
+			// article body text.
+			if text == "" && role != "article" {
+				text = node.SpokenContent()
+			}
+			return (role == "paragraph" || role == "article" || node.Attributes["tag"] == "p") && matchesTextParagraph(text)
 		case "frame":
 			return role == "frame" || role == "internal frame"
 		case "separator":
@@ -240,11 +360,31 @@ func MatchTarget(target string) func(*model.Node) bool {
 		case "embeddedObject":
 			return role == "embedded"
 		case "annotation":
-			return role == "annotation" || node.Attributes["xml-roles"] == "comment"
+			return role == "annotation" || role == "content insertion" || role == "content deletion"
 		case "error":
 			return len(node.Children) == 0 && textErrorKind(node) != ""
 		case "notLinkBlock":
 			return role == "paragraph" && node.SpokenContent() != ""
+		case "article":
+			return hasXMLRole("article")
+		case "figure":
+			return role == "figure" || tag == "figure" || hasXMLRole("figure")
+		case "grouping":
+			return node.Name != "" && (role == "grouping" || role == "group" || tag == "fieldset" || hasXMLRole("group") || hasXMLRole("radiogroup"))
+		case "tab":
+			return role == "page tab" || role == "tab"
+		case "menuItem":
+			return (role == "menu item" && tag != "option") || role == "check menu item" || role == "radio menu item" || role == "menu button"
+		case "toggleButton":
+			return role == "toggle button" || hasXMLRole("switch")
+		case "progressBar":
+			return role == "progress bar"
+		case "reference":
+			// NVDA 2026.1.1 exposes this command globally but Chromium's IA2
+			// virtual buffer does not implement reference quick navigation.
+			return false
+		case "math":
+			return role == "math" || role == "equation" || tag == "math"
 		default:
 			return false
 		}

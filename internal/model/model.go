@@ -42,6 +42,7 @@ type Node struct {
 	TextAttributeRuns []TextAttributeRun    `json:"textAttributeRuns,omitempty"`
 	Locale            string                `json:"locale,omitempty"`
 	AccessibleID      string                `json:"accessibleId,omitempty"`
+	KeyboardShortcut  string                `json:"keyboardShortcut,omitempty"`
 	Interfaces        []string              `json:"interfaces,omitempty"`
 	States            map[string]bool       `json:"states,omitempty"`
 	Attributes        map[string]string     `json:"attributes,omitempty"`
@@ -66,6 +67,9 @@ type Node struct {
 	MaximumValue      *float64              `json:"maximumValue,omitempty"`
 	PositionInSet     int                   `json:"positionInSet,omitempty"`
 	SetSize           int                   `json:"setSize,omitempty"`
+	CaretOffset       int                   `json:"caretOffset,omitempty"`
+	Selections        []TextRange           `json:"selections,omitempty"`
+	Redacted          bool                  `json:"redacted,omitempty"`
 }
 
 func (n Node) HasState(state string) bool { return n.States[state] }
@@ -78,6 +82,9 @@ func (n Node) SpokenContent() string {
 	if value := normalizeSpokenText(n.Name); value != "" {
 		return value
 	}
+	if n.IsProtected() {
+		return normalizeSpokenText(n.Description)
+	}
 	if value := normalizeSpokenText(n.Text); value != "" {
 		return value
 	}
@@ -85,6 +92,28 @@ func (n Node) SpokenContent() string {
 		return value
 	}
 	return normalizeSpokenText(n.Description)
+}
+
+func (n Node) IsProtected() bool {
+	return normalizeRole(n.Role) == "password text" || n.Attributes["hidden"] == "true"
+}
+
+func (n Node) RedactedCopy() Node {
+	copy := n
+	if !copy.IsProtected() {
+		return copy
+	}
+	copy.Redacted = true
+	if copy.Text != "" {
+		copy.Text = "[redacted]"
+	}
+	if copy.ValueText != "" {
+		copy.ValueText = "[redacted]"
+	}
+	copy.TextAttributeRuns = nil
+	copy.Selections = nil
+	copy.CaretOffset = 0
+	return copy
 }
 
 func normalizeSpokenText(value string) string {
@@ -235,7 +264,7 @@ func (g *Graph) Snapshot() []Node {
 	result := make([]Node, 0, len(g.Order))
 	for _, id := range g.Order {
 		if node := g.Nodes[id]; node != nil {
-			copy := *node
+			copy := node.RedactedCopy()
 			result = append(result, copy)
 		}
 	}

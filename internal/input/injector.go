@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Injector interface {
@@ -29,13 +30,28 @@ func (x *XDoTool) Press(ctx context.Context, gesture string) error {
 	gesture = normalizeForXDoTool(gesture)
 	parts := strings.Split(gesture, "+")
 	if len(parts) > 1 && (parts[0] == "Insert" || parts[0] == "Caps_Lock") {
-		modifier := parts[0]
-		key := strings.Join(parts[1:], "+")
-		if err := run(ctx, command, "keydown", modifier); err != nil {
-			return err
+		release := func(modifier string) error {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			defer cancel()
+			return run(releaseCtx, command, "keyup", modifier)
 		}
-		keyErr := run(ctx, command, "key", key)
-		releaseErr := run(ctx, command, "keyup", modifier)
+		held := make([]string, 0, len(parts)-1)
+		for _, modifier := range parts[:len(parts)-1] {
+			if err := run(ctx, command, "keydown", modifier); err != nil {
+				for index := len(held) - 1; index >= 0; index-- {
+					_ = release(held[index])
+				}
+				return err
+			}
+			held = append(held, modifier)
+		}
+		keyErr := run(ctx, command, "key", parts[len(parts)-1])
+		var releaseErr error
+		for index := len(held) - 1; index >= 0; index-- {
+			if err := release(held[index]); err != nil && releaseErr == nil {
+				releaseErr = err
+			}
+		}
 		if keyErr != nil {
 			return keyErr
 		}
@@ -95,6 +111,62 @@ func normalizeForXDoTool(gesture string) string {
 			parts[index] = "Prior"
 		case "pagedown":
 			parts[index] = "Next"
+		case "numpad2":
+			parts[index] = "KP_Down"
+		case "numpad1":
+			parts[index] = "KP_End"
+		case "numpad3":
+			parts[index] = "KP_Next"
+		case "numpad4":
+			parts[index] = "KP_Left"
+		case "numpad5":
+			parts[index] = "KP_Begin"
+		case "numpad6":
+			parts[index] = "KP_Right"
+		case "numpad8":
+			parts[index] = "KP_Up"
+		case "numpad7":
+			parts[index] = "KP_Home"
+		case "numpad9":
+			parts[index] = "KP_Prior"
+		case "numpadminus":
+			parts[index] = "KP_Subtract"
+		case "numpadplus":
+			parts[index] = "KP_Add"
+		case "numpaddivide":
+			parts[index] = "KP_Divide"
+		case "numpadmultiply":
+			parts[index] = "KP_Multiply"
+		case "numpadenter":
+			parts[index] = "KP_Enter"
+		case "numpaddelete":
+			parts[index] = "KP_Delete"
+		case "backspace":
+			parts[index] = "BackSpace"
+		case "delete":
+			parts[index] = "Delete"
+		case ",":
+			parts[index] = "comma"
+		case ".":
+			parts[index] = "period"
+		case "/":
+			parts[index] = "slash"
+		case ";":
+			parts[index] = "semicolon"
+		case "'":
+			parts[index] = "apostrophe"
+		case "[":
+			parts[index] = "bracketleft"
+		case "]":
+			parts[index] = "bracketright"
+		case "\\":
+			parts[index] = "backslash"
+		case "-":
+			parts[index] = "minus"
+		case "=":
+			parts[index] = "equal"
+		case "`":
+			parts[index] = "grave"
 		default:
 			if strings.HasPrefix(part, "f") {
 				number, err := strconv.Atoi(strings.TrimPrefix(part, "f"))

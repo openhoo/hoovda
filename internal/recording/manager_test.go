@@ -1,6 +1,8 @@
 package recording
 
 import (
+	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -14,6 +16,72 @@ func TestRenderTimelineInsertsSilence(t *testing.T) {
 	}
 	if len(audio.PCM) != 2200 {
 		t.Fatalf("PCM bytes = %d", len(audio.PCM))
+	}
+}
+
+func TestWriteJSONRetryReplacesArtifactInventory(t *testing.T) {
+	manager, err := NewManager(Config{Root: t.TempDir(), Display: ":99", Width: 800, Height: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(context.Background(), "retry", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.WriteJSON("retry", "screenreader-events", []byte("first\n")); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := manager.WriteJSON("retry", "screenreader-events", []byte("latest\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := manager.Finish(context.Background(), "retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, artifact := range artifacts {
+		if artifact.Name == "screenreader-events" {
+			count++
+			if artifact.SHA256 != latest.SHA256 {
+				t.Fatalf("events digest = %q, want %q", artifact.SHA256, latest.SHA256)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("events artifact count = %d: %#v", count, artifacts)
+	}
+	content, err := os.ReadFile(latest.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "latest\n" {
+		t.Fatalf("events content = %q", content)
+	}
+}
+
+func TestRemoveArtifactsRejectsEscapeAndActiveSession(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManager(Config{Root: root, Display: ":99", Width: 800, Height: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RemoveArtifacts("../outside"); err == nil {
+		t.Fatal("path escape was accepted")
+	}
+	if err := manager.Start(context.Background(), "active", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RemoveArtifacts("active"); err == nil {
+		t.Fatal("active session removal was accepted")
+	}
+	if _, err := manager.Finish(context.Background(), "active"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RemoveArtifacts("active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(root + "/active"); !os.IsNotExist(err) {
+		t.Fatalf("artifact directory still exists: %v", err)
 	}
 }
 

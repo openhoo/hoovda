@@ -12,11 +12,14 @@ const (
 	BusName                   = "org.a11y.atspi.Registry"
 	RegistryPath              = dbus.ObjectPath("/org/a11y/atspi/registry")
 	DesktopPath               = dbus.ObjectPath("/org/a11y/atspi/accessible/root")
+	CachePath                 = dbus.ObjectPath("/org/a11y/atspi/cache")
 	DeviceControllerPath      = dbus.ObjectPath("/org/a11y/atspi/registry/deviceeventcontroller")
 	ListenerPath              = dbus.ObjectPath("/org/openhoo/hoovda/deviceeventlistener")
 	InterfaceAccessible       = "org.a11y.atspi.Accessible"
+	InterfaceCache            = "org.a11y.atspi.Cache"
 	InterfaceAction           = "org.a11y.atspi.Action"
 	InterfaceComponent        = "org.a11y.atspi.Component"
+	InterfaceHyperlink        = "org.a11y.atspi.Hyperlink"
 	InterfaceText             = "org.a11y.atspi.Text"
 	InterfaceTable            = "org.a11y.atspi.Table"
 	InterfaceTableCell        = "org.a11y.atspi.TableCell"
@@ -82,6 +85,22 @@ type TableCellPosition struct {
 type Relation struct {
 	Type    uint32
 	Targets []ObjectReference
+}
+
+// CacheItem mirrors the modern org.a11y.atspi.Cache.GetItems member signature.
+// It is used as a liveness index only; readNode remains the authoritative source
+// for the richer data required by the screen-reader model.
+type CacheItem struct {
+	Object      ObjectReference
+	Application ObjectReference
+	Parent      ObjectReference
+	Index       int32
+	ChildCount  int32
+	Interfaces  []string
+	Name        string
+	Role        uint32
+	Description string
+	States      []uint32
 }
 
 // ActionDescription mirrors one (sss) member of Action.GetActions.

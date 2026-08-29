@@ -11,6 +11,8 @@ import (
 
 type Kind string
 
+type Provenance string
+
 const (
 	KindSpeech         Kind = "speech"
 	KindBraille        Kind = "braille"
@@ -20,6 +22,14 @@ const (
 	KindAudio          Kind = "audio"
 	KindCommandStarted Kind = "commandStarted"
 	KindCommandSettled Kind = "commandSettled"
+)
+
+const (
+	ProvenanceScreenReaderOutput Provenance = "screenReaderOutput"
+	ProvenanceScreenReaderEvent  Provenance = "screenReaderEvent"
+	ProvenanceAccessibilityEvent Provenance = "accessibilityEvent"
+	ProvenanceAdapterLifecycle   Provenance = "adapterLifecycle"
+	ProvenanceSynthesizedAudio   Provenance = "synthesizedAudio"
 )
 
 type SpeechCommand struct {
@@ -41,6 +51,8 @@ type Event struct {
 	Mode            string          `json:"mode,omitempty"`
 	Reason          string          `json:"reason,omitempty"`
 	Priority        string          `json:"priority,omitempty"`
+	Provenance      Provenance      `json:"provenance,omitempty"`
+	Redacted        bool            `json:"redacted,omitempty"`
 	AudioOffsetNS   int64           `json:"audioOffsetNs,omitempty"`
 	AudioDurationNS int64           `json:"audioDurationNs,omitempty"`
 }
@@ -64,6 +76,9 @@ func NewStore(limit int) *Store {
 func (s *Store) Append(event Event) Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if event.Provenance == "" {
+		event.Provenance = defaultProvenance(event.Kind)
+	}
 	event.Sequence = s.next
 	s.next++
 	event.MonotonicNS = time.Since(s.started).Nanoseconds()
@@ -75,6 +90,23 @@ func (s *Store) Append(event Event) Event {
 	close(s.changed)
 	s.changed = make(chan struct{})
 	return event
+}
+
+func defaultProvenance(kind Kind) Provenance {
+	switch kind {
+	case KindSpeech, KindBraille:
+		return ProvenanceScreenReaderOutput
+	case KindFocus, KindLiveRegion:
+		return ProvenanceAccessibilityEvent
+	case KindMode:
+		return ProvenanceScreenReaderEvent
+	case KindAudio:
+		return ProvenanceSynthesizedAudio
+	case KindCommandStarted, KindCommandSettled:
+		return ProvenanceAdapterLifecycle
+	default:
+		return ProvenanceAdapterLifecycle
+	}
 }
 
 func (s *Store) Cursor() uint64 {
@@ -93,6 +125,9 @@ func (s *Store) Snapshot(after uint64, sessionID string) ([]Event, uint64, error
 	current := s.next - 1
 	if after > current {
 		return nil, current, errors.New("event cursor is ahead of store")
+	}
+	if len(s.events) > 0 && after < s.events[0].Sequence-1 {
+		return nil, current, errors.New("event history was truncated")
 	}
 	result := make([]Event, 0)
 	for _, event := range s.events {

@@ -34,14 +34,30 @@ func (a *Accessibility) DoDefaultAction(ctx context.Context, id model.ObjectID) 
 	return a.client.DoDefaultAction(ctx, id)
 }
 
+func (a *Accessibility) GrabFocus(ctx context.Context, id model.ObjectID) error {
+	return a.client.GrabFocus(ctx, id)
+}
+
+func (a *Accessibility) SetTextSelection(ctx context.Context, id model.ObjectID, start, end int) error {
+	return a.client.SetTextSelection(ctx, id, start, end)
+}
+
+func (a *Accessibility) GenerateMouseEvent(ctx context.Context, x, y int, name string) error {
+	return a.client.GenerateMouseEvent(ctx, x, y, name)
+}
+
 func (a *Accessibility) Events() <-chan engine.NativeEvent { return a.events }
 
 func (a *Accessibility) forwardEvents() {
 	defer close(a.events)
 	for event := range a.client.Events() {
+		var valueObject model.ObjectID
+		if reference, ok := event.Value.(atspi.ObjectReference); ok {
+			valueObject = reference.Model()
+		}
 		a.events <- engine.NativeEvent{
 			Name: event.Name, Source: event.Source, Detail: event.Detail,
-			Detail1: event.Detail1, Detail2: event.Detail2, Value: event.Value,
+			Detail1: event.Detail1, Detail2: event.Detail2, Value: event.Value, ValueObject: valueObject,
 		}
 	}
 }

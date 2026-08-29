@@ -100,7 +100,7 @@ func serve(args []string) error {
 	if err := screenreader.Start(ctx); err != nil {
 		return fmt.Errorf("start screenreader: %w", err)
 	}
-	if _, err := client.RegisterDeviceListener(ctx, cfg.KeyboardLayout, screenreader.HandleGesture); err != nil {
+	if _, err := client.RegisterDeviceListener(ctx, cfg.KeyboardLayout, screenreader.HandlePhysicalGesture, screenreader.ShouldConsumeGesture); err != nil {
 		return err
 	}
 	api, err := server.New(ctx, server.Config{

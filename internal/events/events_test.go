@@ -57,3 +57,17 @@ func TestWaitForIgnoresUnrelatedEvents(t *testing.T) {
 		t.Fatal("matching event did not end wait")
 	}
 }
+
+func TestStoreRejectsTruncatedHistory(t *testing.T) {
+	store := NewStore(2)
+	store.Append(Event{Kind: KindSpeech, Text: "one"})
+	store.Append(Event{Kind: KindSpeech, Text: "two"})
+	store.Append(Event{Kind: KindSpeech, Text: "three"})
+	if _, _, err := store.Snapshot(0, ""); err == nil || err.Error() != "event history was truncated" {
+		t.Fatalf("truncated snapshot error = %v", err)
+	}
+	items, cursor, err := store.Snapshot(1, "")
+	if err != nil || cursor != 3 || len(items) != 2 {
+		t.Fatalf("retained snapshot = %#v, cursor = %d, err = %v", items, cursor, err)
+	}
+}

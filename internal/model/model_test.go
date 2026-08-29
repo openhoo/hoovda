@@ -92,6 +92,37 @@ func TestSpokenContentDropsEmbeddedObjectReplacementCharacters(t *testing.T) {
 	}
 }
 
+func TestProtectedNodeNeverExposesRawValueOrSnapshotText(t *testing.T) {
+	root := ObjectID{"app", "/root"}
+	password := ObjectID{"app", "/password"}
+	node := &Node{
+		ID: password, Parent: root, Role: "password text", Name: "Account password",
+		Text: "correct horse battery staple", ValueText: "correct horse battery staple",
+		CaretOffset: 14, Selections: []TextRange{{Object: password, Start: 0, End: 7}},
+		TextAttributeRuns: []TextAttributeRun{{Start: 0, End: 28, Attributes: map[string]string{"font-weight": "400"}}},
+	}
+	if got := node.SpokenContent(); got != "Account password" {
+		t.Fatalf("protected spoken content = %q", got)
+	}
+	graph, err := NewGraph(root, map[ObjectID]*Node{
+		root: {ID: root, Role: "document web", Children: []ObjectID{password}}, password: node,
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := graph.Snapshot()
+	if len(snapshot) != 2 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	redacted := snapshot[1]
+	if !redacted.Redacted || redacted.Text != "[redacted]" || redacted.ValueText != "[redacted]" || redacted.CaretOffset != 0 || len(redacted.Selections) != 0 || len(redacted.TextAttributeRuns) != 0 {
+		t.Fatalf("redacted node = %#v", redacted)
+	}
+	if node.Text != "correct horse battery staple" {
+		t.Fatal("snapshot redaction mutated live graph")
+	}
+}
+
 func TestMoveInDocumentDoesNotEnterBrowserChromeOrAnotherTab(t *testing.T) {
 	app := ObjectID{"app", "/app"}
 	chromeButton := ObjectID{"app", "/chrome-button"}

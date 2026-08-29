@@ -66,6 +66,20 @@ func TestValidateActiveWebDocumentRejectsMissingActiveFrameChild(t *testing.T) {
 	}
 }
 
+func TestPruneMissingChildrenRemovesOnlyUnavailableReferences(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	live := model.ObjectID{Bus: "app", Path: "/live"}
+	missing := model.ObjectID{Bus: "app", Path: "/missing"}
+	nodes := map[model.ObjectID]*model.Node{
+		root: {ID: root, Children: []model.ObjectID{live, missing}},
+		live: {ID: live, Parent: root},
+	}
+	pruneMissingChildren(nodes)
+	if got := nodes[root].Children; len(got) != 1 || got[0] != live {
+		t.Fatalf("children = %#v", got)
+	}
+}
+
 func TestRelationNameUsesPinnedATSPIEnumeration(t *testing.T) {
 	if got := relationName(18); got != "described by" {
 		t.Fatalf("relation 18 = %q", got)

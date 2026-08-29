@@ -205,6 +205,7 @@ func graphHasWebDocument(graph *model.Graph) bool {
 
 func (c *Client) buildGraph(ctx context.Context, root ObjectReference) (*model.Graph, error) {
 	const maxObjects = 100_000
+	cache := c.cacheSnapshot(ctx, root)
 	nodes := make(map[model.ObjectID]*model.Node)
 	type item struct {
 		ref    ObjectReference
@@ -225,7 +226,13 @@ func (c *Client) buildGraph(ctx context.Context, root ObjectReference) (*model.G
 		if current.depth > 512 {
 			return nil, errors.New("accessible graph exceeds depth limit")
 		}
-		node, err := c.readNodeWithRetry(ctx, current.ref)
+		var cached *CacheItem
+		if cache != nil {
+			if item, live := cache.items[id]; live {
+				cached = &item
+			}
+		}
+		node, err := c.readNodeWithRetry(ctx, current.ref, cached)
 		if err != nil {
 			if current.depth == 0 {
 				return nil, err
@@ -238,6 +245,7 @@ func (c *Client) buildGraph(ctx context.Context, root ObjectReference) (*model.G
 			queue = append(queue, item{ref: ObjectReference{Bus: childID.Bus, Path: dbus.ObjectPath(childID.Path)}, parent: id, depth: current.depth + 1})
 		}
 	}
+	pruneMissingChildren(nodes)
 	graph, err := model.NewGraph(root.Model(), nodes, c.revision.Add(1))
 	if err != nil {
 		return nil, err
@@ -249,14 +257,59 @@ func (c *Client) buildGraph(ctx context.Context, root ObjectReference) (*model.G
 	return graph, nil
 }
 
-func (c *Client) readNodeWithRetry(ctx context.Context, ref ObjectReference) (*model.Node, error) {
+type objectCacheSnapshot struct {
+	items map[model.ObjectID]CacheItem
+}
+
+func (c *Client) cacheSnapshot(ctx context.Context, root ObjectReference) *objectCacheSnapshot {
+	if !root.Valid() {
+		return nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var items []CacheItem
+	if err := c.conn.Object(root.Bus, CachePath).CallWithContext(callCtx, InterfaceCache+".GetItems", 0).Store(&items); err != nil {
+		c.logger.Debug("AT-SPI cache unavailable; using accessible traversal", "application", root.Model(), "error", err)
+		return nil
+	}
+	snapshot := &objectCacheSnapshot{items: make(map[model.ObjectID]CacheItem, len(items))}
+	for _, item := range items {
+		if item.Object.Valid() {
+			snapshot.items[item.Object.Model()] = item
+		}
+	}
+	if _, containsRoot := snapshot.items[root.Model()]; !containsRoot {
+		c.logger.Debug("AT-SPI cache omitted application root; using accessible traversal", "application", root.Model())
+		return nil
+	}
+	return snapshot
+}
+
+func pruneMissingChildren(nodes map[model.ObjectID]*model.Node) {
+	for _, node := range nodes {
+		children := node.Children[:0]
+		for _, child := range node.Children {
+			if _, exists := nodes[child]; exists {
+				children = append(children, child)
+			}
+		}
+		node.Children = children
+	}
+}
+
+func (c *Client) readNodeWithRetry(ctx context.Context, ref ObjectReference, cached *CacheItem) (*model.Node, error) {
 	const attempts = 3
 	var err error
 	for attempt := 0; attempt < attempts; attempt++ {
 		var node *model.Node
-		node, err = c.readNode(ctx, ref)
+		attemptCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		node, err = c.readNodeUsingCache(attemptCtx, ref, cached)
+		cancel()
 		if err == nil {
 			return node, nil
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			break
 		}
 		if attempt == attempts-1 {
 			break
@@ -383,28 +436,45 @@ func (c *Client) ReadNode(ctx context.Context, id model.ObjectID) (*model.Node, 
 }
 
 func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node, error) {
+	return c.readNodeUsingCache(ctx, ref, nil)
+}
+
+func (c *Client) readNodeUsingCache(ctx context.Context, ref ObjectReference, cached *CacheItem) (*model.Node, error) {
 	if !ref.Valid() {
 		return nil, errors.New("invalid accessible reference")
 	}
 	object := c.conn.Object(ref.Bus, ref.Path)
-	name, _ := stringProperty(ctx, object, InterfaceAccessible+".Name")
-	description, _ := stringProperty(ctx, object, InterfaceAccessible+".Description")
+	var name, description string
+	var stateWords []uint32
+	var interfaces []string
+	var childIDs []model.ObjectID
+	if cached != nil {
+		name = cached.Name
+		description = cached.Description
+		stateWords = append([]uint32(nil), cached.States...)
+		interfaces = append([]string(nil), cached.Interfaces...)
+	} else {
+		name, _ = stringProperty(ctx, object, InterfaceAccessible+".Name")
+		description, _ = stringProperty(ctx, object, InterfaceAccessible+".Description")
+	}
 	locale, _ := stringProperty(ctx, object, InterfaceAccessible+".Locale")
 	accessibleID, _ := stringProperty(ctx, object, InterfaceAccessible+".AccessibleId")
 	var role string
 	if err := object.CallWithContext(ctx, InterfaceAccessible+".GetRoleName", 0).Store(&role); err != nil {
 		return nil, fmt.Errorf("role %s: %w", ref.Model(), err)
 	}
-	var stateWords []uint32
-	_ = object.CallWithContext(ctx, InterfaceAccessible+".GetState", 0).Store(&stateWords)
+	if cached == nil {
+		_ = optionalCall(ctx, object, InterfaceAccessible+".GetState").Store(&stateWords)
+	}
 	attributes := make(map[string]string)
-	if err := object.CallWithContext(ctx, InterfaceAccessible+".GetAttributes", 0).Store(&attributes); err != nil {
+	if err := optionalCall(ctx, object, InterfaceAccessible+".GetAttributes").Store(&attributes); err != nil {
 		attributes = nil
 	}
-	var interfaces []string
-	_ = object.CallWithContext(ctx, InterfaceAccessible+".GetInterfaces", 0).Store(&interfaces)
+	if cached == nil {
+		_ = optionalCall(ctx, object, InterfaceAccessible+".GetInterfaces").Store(&interfaces)
+	}
 	children, _ := c.children(ctx, ref)
-	childIDs := make([]model.ObjectID, 0, len(children))
+	childIDs = make([]model.ObjectID, 0, len(children))
 	for _, child := range children {
 		if child.Valid() {
 			childIDs = append(childIDs, child.Model())
@@ -412,7 +482,7 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 	}
 	node := &model.Node{ID: ref.Model(), Children: childIDs, Role: strings.ToLower(role), Name: name, Description: description, Locale: locale, AccessibleID: accessibleID, Interfaces: interfaces, States: DecodeStates(stateWords), Attributes: attributes}
 	var relations []Relation
-	if err := object.CallWithContext(ctx, InterfaceAccessible+".GetRelationSet", 0).Store(&relations); err == nil {
+	if err := optionalCall(ctx, object, InterfaceAccessible+".GetRelationSet").Store(&relations); err == nil {
 		node.Relations = make(map[string][]model.ObjectID, len(relations))
 		for _, relation := range relations {
 			name := relationName(relation.Type)
@@ -425,46 +495,90 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 	}
 	if slicesContains(interfaces, InterfaceText) {
 		var text string
-		if err := object.CallWithContext(ctx, InterfaceText+".GetText", 0, int32(0), int32(-1)).Store(&text); err == nil {
+		if err := optionalCall(ctx, object, InterfaceText+".GetText", int32(0), int32(-1)).Store(&text); err == nil {
 			node.Text = text
-			if characterCount, countErr := int32Property(object, InterfaceText+".CharacterCount"); countErr == nil && characterCount > 0 {
+			if characterCount, countErr := int32Property(ctx, object, InterfaceText+".CharacterCount"); countErr == nil && characterCount > 0 {
 				node.TextAttributeRuns = readTextAttributeRuns(ctx, object, characterCount)
+			}
+		}
+		if caretOffset, caretErr := int32Property(ctx, object, InterfaceText+".CaretOffset"); caretErr == nil && caretOffset >= 0 {
+			node.CaretOffset = int(caretOffset)
+		}
+		var selectionCount int32
+		if err := optionalCall(ctx, object, InterfaceText+".GetNSelections").Store(&selectionCount); err == nil {
+			for index := int32(0); index < selectionCount; index++ {
+				var start, end int32
+				// Text.GetSelection has two top-level output arguments, not one
+				// D-Bus struct. Storing into a single Go struct silently rejected
+				// every real Chromium selection.
+				if err := optionalCall(ctx, object, InterfaceText+".GetSelection", index).Store(&start, &end); err != nil || end <= start {
+					continue
+				}
+				node.Selections = append(node.Selections, model.TextRange{Object: node.ID, Start: int(start), End: int(end)})
+			}
+		}
+	}
+	if slicesContains(interfaces, InterfaceAction) {
+		var actions []ActionDescription
+		if err := optionalCall(ctx, object, InterfaceAction+".GetActions").Store(&actions); err == nil {
+			for _, action := range actions {
+				if value := strings.TrimSpace(action.KeyBinding); value != "" {
+					node.KeyboardShortcut = value
+					break
+				}
+			}
+		}
+	}
+	if value := strings.TrimSpace(node.Attributes["keyshortcuts"]); value != "" {
+		// Chromium's Action key binding can contain only the access-key
+		// character ("x"), while the accessible keyshortcuts attribute retains
+		// the modifier NVDA reports ("Alt+x"). Prefer the complete form.
+		node.KeyboardShortcut = value
+	}
+	if slicesContains(interfaces, InterfaceHyperlink) {
+		var uri string
+		if err := optionalCall(ctx, object, InterfaceHyperlink+".GetURI", int32(0)).Store(&uri); err == nil {
+			if uri = strings.TrimSpace(uri); uri != "" {
+				if node.Attributes == nil {
+					node.Attributes = make(map[string]string)
+				}
+				node.Attributes["url"] = uri
 			}
 		}
 	}
 	if slicesContains(interfaces, InterfaceComponent) {
 		var extents Extents
-		if err := object.CallWithContext(ctx, InterfaceComponent+".GetExtents", 0, uint32(0)).Store(&extents); err == nil {
+		if err := optionalCall(ctx, object, InterfaceComponent+".GetExtents", uint32(0)).Store(&extents); err == nil {
 			node.Bounds = model.Rect{X: int(extents.X), Y: int(extents.Y), Width: int(extents.Width), Height: int(extents.Height)}
 		}
 	}
 	if slicesContains(interfaces, InterfaceTable) {
-		if value, err := int32Property(object, InterfaceTable+".NRows"); err == nil {
+		if value, err := int32Property(ctx, object, InterfaceTable+".NRows"); err == nil {
 			node.RowCount = int(value)
 		}
-		if value, err := int32Property(object, InterfaceTable+".NColumns"); err == nil {
+		if value, err := int32Property(ctx, object, InterfaceTable+".NColumns"); err == nil {
 			node.ColumnCount = int(value)
 		}
 	}
 	if slicesContains(interfaces, InterfaceTableCell) {
 		var position TableCellPosition
-		if err := tupleProperty(object, InterfaceTableCell+".Position", &position); err == nil {
+		if err := tupleProperty(ctx, object, InterfaceTableCell+".Position", &position); err == nil {
 			// AT-SPI coordinates are zero based. Presentation and navigation use
 			// human-facing one-based row and column numbers.
 			node.Row, node.Column = int(position.Row)+1, int(position.Column)+1
 		}
-		if value, err := int32Property(object, InterfaceTableCell+".RowSpan"); err == nil && value > 0 {
+		if value, err := int32Property(ctx, object, InterfaceTableCell+".RowSpan"); err == nil && value > 0 {
 			node.RowSpan = int(value)
 		}
-		if value, err := int32Property(object, InterfaceTableCell+".ColumnSpan"); err == nil && value > 0 {
+		if value, err := int32Property(ctx, object, InterfaceTableCell+".ColumnSpan"); err == nil && value > 0 {
 			node.ColumnSpan = int(value)
 		}
 		var table ObjectReference
-		if err := tupleProperty(object, InterfaceTableCell+".Table", &table); err == nil && table.Valid() {
+		if err := tupleProperty(ctx, object, InterfaceTableCell+".Table", &table); err == nil && table.Valid() {
 			node.Table = table.Model()
 		}
 		var headers []ObjectReference
-		if err := object.CallWithContext(ctx, InterfaceTableCell+".GetRowHeaderCells", 0).Store(&headers); err == nil {
+		if err := optionalCall(ctx, object, InterfaceTableCell+".GetRowHeaderCells").Store(&headers); err == nil {
 			for _, header := range headers {
 				if header.Valid() {
 					node.RowHeaders = append(node.RowHeaders, header.Model())
@@ -472,7 +586,7 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 			}
 		}
 		headers = nil
-		if err := object.CallWithContext(ctx, InterfaceTableCell+".GetColumnHeaderCells", 0).Store(&headers); err == nil {
+		if err := optionalCall(ctx, object, InterfaceTableCell+".GetColumnHeaderCells").Store(&headers); err == nil {
 			for _, header := range headers {
 				if header.Valid() {
 					node.ColumnHeaders = append(node.ColumnHeaders, header.Model())
@@ -484,13 +598,13 @@ func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node
 		if value, err := stringProperty(ctx, object, InterfaceValue+".Text"); err == nil {
 			node.ValueText = value
 		}
-		if value, err := float64Property(object, InterfaceValue+".CurrentValue"); err == nil {
+		if value, err := float64Property(ctx, object, InterfaceValue+".CurrentValue"); err == nil {
 			node.CurrentValue = &value
 		}
-		if value, err := float64Property(object, InterfaceValue+".MinimumValue"); err == nil {
+		if value, err := float64Property(ctx, object, InterfaceValue+".MinimumValue"); err == nil {
 			node.MinimumValue = &value
 		}
-		if value, err := float64Property(object, InterfaceValue+".MaximumValue"); err == nil {
+		if value, err := float64Property(ctx, object, InterfaceValue+".MaximumValue"); err == nil {
 			node.MaximumValue = &value
 		}
 	}
@@ -518,7 +632,7 @@ func readTextAttributeRuns(ctx context.Context, object dbus.BusObject, character
 	for offset, count := int32(0), 0; offset < characterCount && count < maxRuns; count++ {
 		attributes := make(map[string]string)
 		var start, end int32
-		err := object.CallWithContext(ctx, InterfaceText+".GetAttributeRun", 0, offset, false).Store(&attributes, &start, &end)
+		err := optionalCall(ctx, object, InterfaceText+".GetAttributeRun", offset, false).Store(&attributes, &start, &end)
 		if err != nil || end <= offset || start < 0 {
 			break
 		}
@@ -531,6 +645,12 @@ func readTextAttributeRuns(ctx context.Context, object dbus.BusObject, character
 		offset = end
 	}
 	return runs
+}
+
+func optionalCall(ctx context.Context, object dbus.BusObject, method string, arguments ...any) *dbus.Call {
+	callCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	return object.CallWithContext(callCtx, method, 0, arguments...)
 }
 
 func resolveGraphContext(graph *model.Graph) {
@@ -622,8 +742,58 @@ func (c *Client) DoDefaultAction(ctx context.Context, id model.ObjectID) error {
 	return nil
 }
 
+func (c *Client) GrabFocus(ctx context.Context, id model.ObjectID) error {
+	object := c.conn.Object(id.Bus, dbus.ObjectPath(id.Path))
+	var focused bool
+	if err := object.CallWithContext(ctx, InterfaceComponent+".GrabFocus", 0).Store(&focused); err != nil {
+		return err
+	}
+	if !focused {
+		return errors.New("accessible focus request returned false")
+	}
+	return nil
+}
+
+func (c *Client) SetTextSelection(ctx context.Context, id model.ObjectID, start, end int) error {
+	if start < 0 || end <= start {
+		return fmt.Errorf("invalid text selection %d..%d", start, end)
+	}
+	object := c.conn.Object(id.Bus, dbus.ObjectPath(id.Path))
+	var count int32
+	if err := object.CallWithContext(ctx, InterfaceText+".GetNSelections", 0).Store(&count); err != nil {
+		return err
+	}
+	var selected bool
+	method := InterfaceText + ".AddSelection"
+	arguments := []any{int32(start), int32(end)}
+	if count > 0 {
+		method = InterfaceText + ".SetSelection"
+		arguments = []any{int32(0), int32(start), int32(end)}
+	}
+	if err := object.CallWithContext(ctx, method, 0, arguments...).Store(&selected); err != nil {
+		return err
+	}
+	if !selected {
+		return errors.New("accessible text selection returned false")
+	}
+	return nil
+}
+
+func (c *Client) GenerateMouseEvent(ctx context.Context, x, y int, name string) error {
+	if x < 0 || y < 0 || !slicesContains([]string{"abs", "b1c", "b1p", "b1r", "b3c", "b3p", "b3r"}, name) {
+		return fmt.Errorf("invalid mouse event %q at %d,%d", name, x, y)
+	}
+	controller := c.conn.Object(BusName, DeviceControllerPath)
+	// GenerateMouseEvent returns no D-Bus values. Treat successful transport as
+	// success; calling Store here produces dbus.Store: length mismatch.
+	if err := controller.CallWithContext(ctx, InterfaceDeviceController+".GenerateMouseEvent", 0, int32(x), int32(y), name).Err; err != nil {
+		return err
+	}
+	return nil
+}
+
 func stringProperty(ctx context.Context, object dbus.BusObject, name string) (string, error) {
-	value, err := object.GetProperty(name)
+	value, err := property(ctx, object, name)
 	if err != nil {
 		return "", err
 	}
@@ -634,8 +804,8 @@ func stringProperty(ctx context.Context, object dbus.BusObject, name string) (st
 	return result, nil
 }
 
-func int32Property(object dbus.BusObject, name string) (int32, error) {
-	value, err := object.GetProperty(name)
+func int32Property(ctx context.Context, object dbus.BusObject, name string) (int32, error) {
+	value, err := property(ctx, object, name)
 	if err != nil {
 		return 0, err
 	}
@@ -646,8 +816,8 @@ func int32Property(object dbus.BusObject, name string) (int32, error) {
 	return result, nil
 }
 
-func float64Property(object dbus.BusObject, name string) (float64, error) {
-	value, err := object.GetProperty(name)
+func float64Property(ctx context.Context, object dbus.BusObject, name string) (float64, error) {
+	value, err := property(ctx, object, name)
 	if err != nil {
 		return 0, err
 	}
@@ -658,8 +828,8 @@ func float64Property(object dbus.BusObject, name string) (float64, error) {
 	return result, nil
 }
 
-func tupleProperty(object dbus.BusObject, name string, destination any) error {
-	value, err := object.GetProperty(name)
+func tupleProperty(ctx context.Context, object dbus.BusObject, name string, destination any) error {
+	value, err := property(ctx, object, name)
 	if err != nil {
 		return err
 	}
@@ -667,6 +837,24 @@ func tupleProperty(object dbus.BusObject, name string, destination any) error {
 		return fmt.Errorf("property %s has an invalid tuple: %w", name, err)
 	}
 	return nil
+}
+
+func property(ctx context.Context, object dbus.BusObject, name string) (dbus.Variant, error) {
+	separator := strings.LastIndexByte(name, '.')
+	if separator <= 0 || separator == len(name)-1 {
+		return dbus.Variant{}, fmt.Errorf("invalid property name %q", name)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	var value dbus.Variant
+	err := object.CallWithContext(
+		callCtx,
+		"org.freedesktop.DBus.Properties.Get",
+		0,
+		name[:separator],
+		name[separator+1:],
+	).Store(&value)
+	return value, err
 }
 
 func slicesContains(values []string, target string) bool {
@@ -687,12 +875,11 @@ func (c *Client) WaitForBrowser(ctx context.Context, hint string, preferred mode
 	for {
 		graph, err := c.BrowserGraph(ctx, hint, preferred)
 		if err == nil && graphHasWebDocument(graph) {
-			if !preferred.Valid() {
-				return graph, nil
-			}
-			if _, ok := graph.Nodes[preferred]; ok {
-				return graph, nil
-			}
+			// preferred ranks candidates; it is not a liveness requirement.
+			// Chromium replaces accessible object IDs during navigation and DOM
+			// reconstruction. Engine.Refresh remaps cursors after accepting the new
+			// complete graph, so waiting for an obsolete ID can only time out.
+			return graph, nil
 		}
 		select {
 		case <-ctx.Done():

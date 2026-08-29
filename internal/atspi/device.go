@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/openhoo/hoovda/internal/profile"
@@ -19,17 +20,37 @@ const (
 	keyReleaseMask   = uint32(1 << keyReleasedEvent)
 )
 
+var keypadHardwareKeys = map[uint32]string{
+	63: "numpadmultiply", 79: "numpad7", 80: "numpad8", 81: "numpad9",
+	82: "numpadminus", 83: "numpad4", 84: "numpad5", 85: "numpad6",
+	86: "numpadplus", 87: "numpad1", 88: "numpad2", 89: "numpad3",
+	91: "numpaddelete", 104: "numpadenter", 106: "numpaddivide",
+}
+
 type GestureHandler func(context.Context, string) (bool, error)
+type GestureConsumer func(string) bool
+type deviceJob struct {
+	gesture  string
+	released <-chan struct{}
+}
+type pendingKey struct {
+	released chan struct{}
+	consume  bool
+}
 
 type DeviceListener struct {
 	mu           sync.Mutex
 	heldModifier string
 	layout       string
 	handler      GestureHandler
+	consumer     GestureConsumer
+	jobs         chan deviceJob
+	pending      map[string]pendingKey
 }
 
-func (c *Client) RegisterDeviceListener(ctx context.Context, layout string, handler GestureHandler) (*DeviceListener, error) {
-	listener := &DeviceListener{layout: layout, handler: handler}
+func (c *Client) RegisterDeviceListener(ctx context.Context, layout string, handler GestureHandler, consumer GestureConsumer) (*DeviceListener, error) {
+	listener := &DeviceListener{layout: layout, handler: handler, consumer: consumer, jobs: make(chan deviceJob, 256), pending: make(map[string]pendingKey)}
+	go listener.run(ctx)
 	if err := c.conn.Export(listener, ListenerPath, InterfaceDeviceListener); err != nil {
 		return nil, fmt.Errorf("export device listener: %w", err)
 	}
@@ -49,6 +70,29 @@ func (c *Client) RegisterDeviceListener(ctx context.Context, layout string, hand
 	return listener, nil
 }
 
+func (l *DeviceListener) run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-l.jobs:
+			// Chromium can block accessibility-object replies until the grabbed key
+			// finishes. Wait for the release callback before a graph-reading command
+			// touches Chromium. The fallback covers stacks that omit grabbed releases.
+			timer := time.NewTimer(250 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-job.released:
+				timer.Stop()
+			case <-timer.C:
+			}
+			_, _ = l.handler(context.Background(), job.gesture)
+		}
+	}
+}
+
 type listenerGrab struct {
 	Mask uint32
 	Keys []KeyDefinition
@@ -56,6 +100,7 @@ type listenerGrab struct {
 
 func listenerGrabs(layout string) []listenerGrab {
 	const shiftLockMask = uint32(1 << 1)
+	const numLockMask = uint32(1 << 14)
 	grouped := make(map[uint32]map[int32]KeyDefinition)
 	add := func(mask uint32, key string, shifted bool) {
 		definition, ok := keyDefinition(key, shifted)
@@ -66,6 +111,21 @@ func listenerGrabs(layout string) []listenerGrab {
 			grouped[mask] = make(map[int32]KeyDefinition)
 		}
 		grouped[mask][definition.KeySym] = definition
+		// XKB resolves keypad digits to either their navigation or numeric
+		// keysym depending on Num Lock and Shift. Register both variants: an
+		// injected Shift+KP_Down can otherwise arrive as KP_2 and miss the
+		// listener entirely before normalizeEventKey gets a chance to fold it.
+		if alternate, ok := alternateKeypadDefinition(key); ok {
+			grouped[mask][alternate.KeySym] = alternate
+			// AT-SPI exposes Num Lock as modifier bit 14. Keypad events can
+			// carry it even when XKB resolves the requested navigation keysym,
+			// so install an equivalent grab for that ambient modifier state.
+			if grouped[mask|numLockMask] == nil {
+				grouped[mask|numLockMask] = make(map[int32]KeyDefinition)
+			}
+			grouped[mask|numLockMask][definition.KeySym] = definition
+			grouped[mask|numLockMask][alternate.KeySym] = alternate
+		}
 	}
 
 	for _, command := range profile.Commands() {
@@ -94,6 +154,13 @@ func listenerGrabs(layout string) []listenerGrab {
 			}
 			key := parts[len(parts)-1]
 			add(mask, key, mask&1 != 0)
+			if mask&1 != 0 {
+				// AT-SPI registries differ on whether a shifted number or
+				// punctuation gesture is matched by its base or shifted keysym.
+				// Register both under ShiftMask; the emitted event still normalizes
+				// to one canonical command gesture.
+				add(mask, key, false)
+			}
 			if virtualModifier != "" {
 				add(0, virtualModifier, false)
 				if virtualModifier == "capslock" {
@@ -102,6 +169,12 @@ func listenerGrabs(layout string) []listenerGrab {
 					// HooVDA's virtual modifier, never as an ambient lock toggle.
 					add(shiftLockMask, virtualModifier, false)
 					add(mask|shiftLockMask, key, mask&1 != 0)
+					if mask&1 != 0 {
+						// Caps Lock and Shift cancel each other for letters. The
+						// resulting event therefore carries LockMask|ShiftMask but
+						// the base lowercase keysym.
+						add(mask|shiftLockMask, key, false)
+					}
 					// XKB can resolve a letter to its uppercase keysym while the
 					// physical Caps Lock key remains down, even when the preemptive
 					// AT-SPI listener consumed the Caps Lock press and therefore
@@ -132,6 +205,18 @@ func listenerGrabs(layout string) []listenerGrab {
 	return result
 }
 
+func alternateKeypadDefinition(key string) (KeyDefinition, bool) {
+	keysyms := map[string]int32{
+		"numpad1": 0xffb1, "numpad2": 0xffb2, "numpad3": 0xffb3,
+		"numpad4": 0xffb4, "numpad5": 0xffb5, "numpad6": 0xffb6,
+		"numpad7": 0xffb7, "numpad8": 0xffb8, "numpad9": 0xffb9,
+		"numpadminus": '-', "numpadplus": '+', "numpadmultiply": '*',
+		"numpaddivide": '/', "numpadenter": 0xff0d, "numpaddelete": 0xffff,
+	}
+	value, ok := keysyms[strings.ToLower(strings.TrimSpace(key))]
+	return KeyDefinition{KeySym: value}, ok
+}
+
 func keyDefinition(key string, shifted bool) (KeyDefinition, bool) {
 	key = strings.ToLower(strings.TrimSpace(key))
 	if len([]rune(key)) == 1 {
@@ -139,7 +224,10 @@ func keyDefinition(key string, shifted bool) (KeyDefinition, bool) {
 		if shifted {
 			if r >= 'a' && r <= 'z' {
 				r -= 'a' - 'A'
-			} else if replacement, ok := map[rune]rune{'1': '!', '2': '@', '3': '#', '4': '$', '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')'}[r]; ok {
+			} else if replacement, ok := map[rune]rune{
+				'1': '!', '2': '@', '3': '#', '4': '$', '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+				',': '<', '.': '>', ';': ':', '\'': '"', '[': '{', ']': '}', '\\': '|', '-': '_', '=': '+', '`': '~',
+			}[r]; ok {
 				r = replacement
 			}
 		}
@@ -150,6 +238,12 @@ func keyDefinition(key string, shifted bool) (KeyDefinition, bool) {
 		"home": 0xff50, "left": 0xff51, "up": 0xff52, "right": 0xff53,
 		"down": 0xff54, "pageup": 0xff55, "pagedown": 0xff56, "end": 0xff57,
 		"insert": 0xff63, "capslock": 0xffe5,
+		"numpad1": 0xff9c, "numpad2": 0xff99, "numpad3": 0xff9b, "numpad4": 0xff96,
+		"numpad5": 0xff9d, "numpad6": 0xff98, "numpad8": 0xff97,
+		"numpad7": 0xff95, "numpad9": 0xff9a, "numpadplus": 0xffab,
+		"numpadminus": 0xffad, "numpaddivide": 0xffaf, "numpadmultiply": 0xffaa,
+		"numpadenter":  0xff8d,
+		"numpaddelete": 0xff9f, "backspace": 0xff08, "delete": 0xffff,
 	}
 	if key == "tab" && shifted {
 		return KeyDefinition{KeySym: 0xfe20}, true // ISO_Left_Tab
@@ -170,12 +264,22 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := normalizeEventKey(event)
-	if key == "insert" || key == "capslock" {
-		if event.Type == keyPressedEvent {
-			l.heldModifier = key
-		} else if event.Type == keyReleasedEvent && l.heldModifier == key {
-			l.heldModifier = ""
+	if event.Type == keyReleasedEvent {
+		if pending, ok := l.pending[deviceEventIdentity(event, key)]; ok {
+			close(pending.released)
+			delete(l.pending, deviceEventIdentity(event, key))
+			return pending.consume, nil
 		}
+		if key == "insert" || key == "capslock" {
+			if l.heldModifier == key {
+				l.heldModifier = ""
+			}
+			return true, nil
+		}
+		return false, nil
+	}
+	if key == "insert" || key == "capslock" {
+		l.heldModifier = key
 		return true, nil
 	}
 	if event.Type != keyPressedEvent {
@@ -210,11 +314,39 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 		gesture = strings.Join(append(modifiers, key), "+")
 	}
 	gesture = profile.NormalizeGesture(gesture)
-	if _, ok := profile.CommandByGesture(gesture, l.layout); !ok {
+	command, ok := profile.CommandByGesture(gesture, l.layout)
+	if !ok {
 		return false, nil
+	}
+	if l.jobs != nil && profile.CommandNeedsGraph(command) {
+		consume := command.ConsumesBrowse
+		if l.consumer != nil {
+			consume = l.consumer(gesture)
+		}
+		releaseKey := deviceEventIdentity(event, key)
+		if previous, ok := l.pending[releaseKey]; ok {
+			close(previous.released)
+		}
+		released := make(chan struct{})
+		l.pending[releaseKey] = pendingKey{released: released, consume: consume}
+		select {
+		case l.jobs <- deviceJob{gesture: gesture, released: released}:
+			return consume, nil
+		default:
+			delete(l.pending, releaseKey)
+			close(released)
+			return false, DBusError(fmt.Errorf("device command queue is full"))
+		}
 	}
 	consume, err := l.handler(context.Background(), gesture)
 	return consume, DBusError(err)
+}
+
+func deviceEventIdentity(event DeviceEvent, key string) string {
+	if event.HWCode != 0 {
+		return fmt.Sprintf("hardware:%d", event.HWCode)
+	}
+	return "key:" + key
 }
 
 func isPhysicalModifierKey(key string) bool {
@@ -227,10 +359,55 @@ func isPhysicalModifierKey(key string) bool {
 }
 
 func normalizeEventKey(event DeviceEvent) string {
-	value := strings.ToLower(strings.TrimSpace(event.EventString))
+	// Keypad operators often expose ordinary text in EventString (for example
+	// KP_Subtract reports "-"). Hardware codes are unambiguous for these
+	// dedicated keys and must win before generic text normalization.
+	if key, ok := keypadHardwareKeys[event.HWCode]; ok {
+		return key
+	}
+	// XLookupString reports the main Delete key as the DEL control byte rather
+	// than the symbolic name. Prefer its unambiguous keysym before interpreting
+	// EventString so the gesture remains addressable.
+	switch event.ID {
+	case 0xffff:
+		return "delete"
+	case 0xff08:
+		return "backspace"
+	}
+	if event.Modifiers&4 != 0 && event.ID >= 0x20 && event.ID <= 0x7e {
+		// Control chords frequently replace EventString with an ASCII control
+		// byte (for example Ctrl+[ becomes ESC). The X11 keysym still identifies
+		// the physical printable key and is the stable gesture identity.
+		value := strings.ToLower(string(rune(event.ID)))
+		if base, ok := map[string]string{
+			"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
+			"<": ",", ">": ".", ":": ";", "\"": "'", "{": "[", "}": "]", "|": "\\", "_": "-", "+": "=", "~": "`",
+		}[value]; ok {
+			value = base
+		}
+		if value == " " {
+			return "space"
+		}
+		return value
+	}
+	rawValue := strings.ToLower(event.EventString)
+	if event.Modifiers&4 != 0 {
+		runes := []rune(rawValue)
+		if len(runes) == 1 && runes[0] >= 1 && runes[0] <= 26 {
+			// XLookupString encodes Ctrl+A through Ctrl+Z as ASCII control
+			// bytes. Preserve the underlying letter for gesture matching.
+			return string(rune('a') + runes[0] - 1)
+		}
+	}
+	value := strings.TrimSpace(rawValue)
 	if value != "" {
 		if event.Modifiers&1 != 0 {
-			if base, ok := map[string]string{"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0"}[value]; ok {
+			if base, ok := map[string]string{
+				"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
+				"<": ",", ">": ".", ":": ";", "\"": "'", "{": "[", "}": "]", "|": "\\", "_": "-", "+": "=", "~": "`",
+				"exclam": "1", "at": "2", "numbersign": "3", "dollar": "4", "percent": "5", "asciicircum": "6",
+				"ampersand": "7", "asterisk": "8", "parenleft": "9", "parenright": "0",
+			}[value]; ok {
 				return base
 			}
 		}
@@ -245,6 +422,40 @@ func normalizeEventKey(event DeviceEvent) string {
 			return "pageup"
 		case "next", "page_down":
 			return "pagedown"
+		case "kp_down", "kp_2":
+			return "numpad2"
+		case "kp_end", "kp_1":
+			return "numpad1"
+		case "kp_next", "kp_3":
+			return "numpad3"
+		case "kp_left", "kp_4":
+			return "numpad4"
+		case "kp_begin", "kp_5":
+			return "numpad5"
+		case "kp_right", "kp_6":
+			return "numpad6"
+		case "kp_up", "kp_8":
+			return "numpad8"
+		case "kp_home", "kp_7":
+			return "numpad7"
+		case "kp_prior", "kp_9":
+			return "numpad9"
+		case "kp_subtract":
+			return "numpadminus"
+		case "kp_add":
+			return "numpadplus"
+		case "kp_divide":
+			return "numpaddivide"
+		case "kp_multiply":
+			return "numpadmultiply"
+		case "kp_enter":
+			return "numpadenter"
+		case "kp_delete", "kp_decimal":
+			return "numpaddelete"
+		case "backspace":
+			return "backspace"
+		case "delete":
+			return "delete"
 		}
 		return value
 	}

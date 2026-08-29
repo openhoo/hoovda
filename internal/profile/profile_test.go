@@ -13,6 +13,20 @@ func TestCatalogIsUnambiguous(t *testing.T) {
 	}
 }
 
+func TestCommandNeedsGraphExcludesStateOnlyBrailleTether(t *testing.T) {
+	tether, ok := CommandByID("brailleToggleTether")
+	if !ok {
+		t.Fatal("brailleToggleTether missing")
+	}
+	if CommandNeedsGraph(tether) {
+		t.Fatal("brailleToggleTether must not refresh the accessibility graph")
+	}
+	pan, ok := CommandByID("braillePanForward")
+	if !ok || !CommandNeedsGraph(pan) {
+		t.Fatal("braillePanForward must refresh a dirty accessibility graph")
+	}
+}
+
 func TestEnglishHeadingPresentation(t *testing.T) {
 	presenter, _ := NewPresenter("en-US")
 	got := presenter.Present(&model.Node{Role: "heading", Name: "Checkout", HeadingLevel: 1, States: map[string]bool{"enabled": true}}, "quickNavigation")
@@ -46,6 +60,24 @@ func TestGermanPresentationMatchesPinnedNVDAStrings(t *testing.T) {
 	}
 }
 
+func TestReportFormattingMatchesPinnedNVDAStrings(t *testing.T) {
+	node := &model.Node{
+		Attributes: map[string]string{"text-align": "left"},
+		TextAttributeRuns: []model.TextAttributeRun{{Start: 0, End: 24, Attributes: map[string]string{
+			"family-name": "Liberation Serif", "size": "18pt", "fg-color": "0,0,0",
+			"bg-color": "255,255,255", "weight": "700",
+		}}},
+	}
+	english, _ := NewPresenter("en-US")
+	if got := english.TextFormatting(node, 0).Speech; got != "Times New Roman 18 pt black on white bold align left" {
+		t.Fatalf("English formatting = %q", got)
+	}
+	german, _ := NewPresenter("de-DE")
+	if got := german.TextFormatting(node, 0).Speech; got != "Times New Roman 18 pt Schwarz auf Weiß fett linksbündig" {
+		t.Fatalf("German formatting = %q", got)
+	}
+}
+
 func TestSelectedStateIsPresentedOnce(t *testing.T) {
 	presenter, _ := NewPresenter("en-US")
 	got := presenter.Present(&model.Node{Role: "list item", Name: "One", States: map[string]bool{"enabled": true, "selected": true}}, "focus")
@@ -61,7 +93,7 @@ func TestGermanHeadingAndLandmarkBrailleUsePinnedNVDALabels(t *testing.T) {
 		t.Fatalf("heading = %#v", heading)
 	}
 	landmark := presenter.Present(&model.Node{Role: "landmark", Attributes: map[string]string{"xml-roles": "main"}, States: map[string]bool{"enabled": true}}, "quickNavigation")
-	if landmark.Speech != "Haupt Sprungmarke" {
+	if landmark.Speech != "Haupt Sprungmarke" || landmark.Braille != "spmk Haupt" {
 		t.Fatalf("landmark = %#v", landmark)
 	}
 }
@@ -69,54 +101,78 @@ func TestGermanHeadingAndLandmarkBrailleUsePinnedNVDALabels(t *testing.T) {
 func TestQuickNavigationBoundariesMatchPinnedNVDACatalog(t *testing.T) {
 	want := map[string]map[string][2]string{
 		"en-US": {
-			"heading":        {"no next heading", "no previous heading"},
-			"table":          {"no next table", "no previous table"},
-			"link":           {"no next link", "no previous link"},
-			"visitedLink":    {"no next visited link", "no previous visited link"},
-			"unvisitedLink":  {"no next unvisited link", "no previous unvisited link"},
-			"formField":      {"no next form field", "no previous form field"},
-			"list":           {"no next list", "no previous list"},
-			"listItem":       {"no next list item", "no previous list item"},
-			"button":         {"no next button", "no previous button"},
-			"edit":           {"no next edit field", "no previous edit field"},
-			"frame":          {"no next frame", "no previous frame"},
-			"separator":      {"no next separator", "no previous separator"},
-			"radioButton":    {"no next radio button", "no previous radio button"},
-			"comboBox":       {"no next combo box", "no previous combo box"},
-			"checkBox":       {"no next check box", "no previous check box"},
-			"graphic":        {"no next graphic", "no previous graphic"},
-			"blockQuote":     {"no next block quote", "no previous block quote"},
-			"notLinkBlock":   {"no more text after a block of links", "no more text before a block of links"},
-			"landmark":       {"no next landmark", "no previous landmark"},
-			"embeddedObject": {"no next embedded object", "no previous embedded object"},
-			"annotation":     {"no next annotation", "no previous annotation"},
-			"error":          {"no next error", "no previous error"},
-			"textParagraph":  {"no next text paragraph", "no previous text paragraph"},
+			"heading":           {"no next heading", "no previous heading"},
+			"table":             {"no next table", "no previous table"},
+			"link":              {"no next link", "no previous link"},
+			"visitedLink":       {"no next visited link", "no previous visited link"},
+			"unvisitedLink":     {"no next unvisited link", "no previous unvisited link"},
+			"formField":         {"no next form field", "no previous form field"},
+			"list":              {"no next list", "no previous list"},
+			"listItem":          {"no next list item", "no previous list item"},
+			"button":            {"no next button", "no previous button"},
+			"edit":              {"no next edit field", "no previous edit field"},
+			"frame":             {"no next frame", "no previous frame"},
+			"separator":         {"no next separator", "no previous separator"},
+			"radioButton":       {"no next radio button", "no previous radio button"},
+			"comboBox":          {"no next combo box", "no previous combo box"},
+			"checkBox":          {"no next check box", "no previous check box"},
+			"graphic":           {"no next graphic", "no previous graphic"},
+			"blockQuote":        {"no next block quote", "no previous block quote"},
+			"notLinkBlock":      {"no more text after a block of links", "no more text before a block of links"},
+			"landmark":          {"no next landmark", "no previous landmark"},
+			"embeddedObject":    {"no next embedded object", "no previous embedded object"},
+			"annotation":        {"no next annotation", "no previous annotation"},
+			"error":             {"Not supported in this document", "Not supported in this document"},
+			"textParagraph":     {"no next text paragraph", "no previous text paragraph"},
+			"article":           {"no next article", "no previous article"},
+			"figure":            {"no next figure", "no previous figure"},
+			"grouping":          {"no next grouping", "no previous grouping"},
+			"tab":               {"no next tab", "no previous tab"},
+			"menuItem":          {"no next menu item", "no previous menu item"},
+			"toggleButton":      {"no next toggle button", "no previous toggle button"},
+			"progressBar":       {"no next progress bar", "no previous progress bar"},
+			"reference":         {"Not supported in this document", "Not supported in this document"},
+			"math":              {"no next math formula", "no previous math formula"},
+			"verticalParagraph": {"no next vertically aligned paragraph", "no previous vertically aligned paragraph"},
+			"sameStyle":         {"No next same style text", "No previous same style text"},
+			"differentStyle":    {"No next different style text", "No previous different style text"},
 		},
 		"de-DE": {
-			"heading":        {"Keine weitere Überschrift", "Keine vorherige Überschrift"},
-			"table":          {"Keine weitere Tabelle", "Keine vorherige Tabelle"},
-			"link":           {"Kein weiterer Link", "Kein vorheriger Link"},
-			"visitedLink":    {"Kein weiterer besuchter Link", "Kein vorheriger besuchter Link"},
-			"unvisitedLink":  {"Kein weiterer unbesuchter Link", "Kein vorheriger unbesuchter Link"},
-			"formField":      {"Kein weiteres Formularfeld", "Kein vorheriges Formularfeld"},
-			"list":           {"Keine weitere Liste", "Keine vorherige Liste"},
-			"listItem":       {"Kein weiterer Listeneintrag", "Kein vorheriger Listeneintrag"},
-			"button":         {"Kein weiterer Schalter", "Kein vorheriger Schalter"},
-			"edit":           {"Kein weiteres Eingabefeld", "Kein vorheriges Eingabefeld"},
-			"frame":          {"Kein weiterer Rahmen", "Kein weiterer Rahmen"},
-			"separator":      {"Keine weitere Trennlinie", "Keine vorherige Trennlinie"},
-			"radioButton":    {"Kein weiterer Auswahlschalter", "Kein vorheriger Auswahlschalter"},
-			"comboBox":       {"Kein weiteres Kombinationsfeld", "Kein vorheriges Kombinationsfeld"},
-			"checkBox":       {"Kein weiteres Kontrollfeld", "Kein vorheriges Kontrollfeld"},
-			"graphic":        {"Keine weitere Grafik", "Keine vorherige Grafik"},
-			"blockQuote":     {"Kein weiterer Zitatblock", "Kein vorheriger Zitatblock"},
-			"notLinkBlock":   {"Kein weiterer Text nach dem Abschnitt der Links", "Kein weiterer Text vor dem Abschnitt der Links"},
-			"landmark":       {"Keine weitere Sprungmarke", "Keine vorherige Sprungmarke"},
-			"embeddedObject": {"Kein weiteres eingebettetes Objekt", "Kein vorheriges eingebettetes Objekt"},
-			"annotation":     {"Keine weitere Anmerkung", "Keine vorherige Anmerkung"},
-			"error":          {"Kein weiterer Fehler", "Kein vorheriger Fehler"},
-			"textParagraph":  {"Keine weiteren Absätze", "kein vorheriger Textabsatz"},
+			"heading":           {"Keine weitere Überschrift", "Keine vorherige Überschrift"},
+			"table":             {"Keine weitere Tabelle", "Keine vorherige Tabelle"},
+			"link":              {"Kein weiterer Link", "Kein vorheriger Link"},
+			"visitedLink":       {"Kein weiterer besuchter Link", "Kein vorheriger besuchter Link"},
+			"unvisitedLink":     {"Kein weiterer unbesuchter Link", "Kein vorheriger unbesuchter Link"},
+			"formField":         {"Kein weiteres Formularfeld", "Kein vorheriges Formularfeld"},
+			"list":              {"Keine weitere Liste", "Keine vorherige Liste"},
+			"listItem":          {"Kein weiterer Listeneintrag", "Kein vorheriger Listeneintrag"},
+			"button":            {"Kein weiterer Schalter", "Kein vorheriger Schalter"},
+			"edit":              {"Kein weiteres Eingabefeld", "Kein vorheriges Eingabefeld"},
+			"frame":             {"Kein weiterer Rahmen", "Kein weiterer Rahmen"},
+			"separator":         {"Keine weitere Trennlinie", "Keine vorherige Trennlinie"},
+			"radioButton":       {"Kein weiterer Auswahlschalter", "Kein vorheriger Auswahlschalter"},
+			"comboBox":          {"Kein weiteres Kombinationsfeld", "Kein vorheriges Kombinationsfeld"},
+			"checkBox":          {"Kein weiteres Kontrollfeld", "Kein vorheriges Kontrollfeld"},
+			"graphic":           {"Keine weitere Grafik", "Keine vorherige Grafik"},
+			"blockQuote":        {"Kein weiterer Zitatblock", "Kein vorheriger Zitatblock"},
+			"notLinkBlock":      {"Kein weiterer Text nach dem Abschnitt der Links", "Kein weiterer Text vor dem Abschnitt der Links"},
+			"landmark":          {"Keine weitere Sprungmarke", "Keine vorherige Sprungmarke"},
+			"embeddedObject":    {"Kein weiteres eingebettetes Objekt", "Kein vorheriges eingebettetes Objekt"},
+			"annotation":        {"Keine weitere Anmerkung", "Keine vorherige Anmerkung"},
+			"error":             {"Keine Unterstützung in diesem Dokument", "Keine Unterstützung in diesem Dokument"},
+			"textParagraph":     {"Keine weiteren Absätze", "kein vorheriger Textabsatz"},
+			"article":           {"Kein weiterer Artikel", "Kein vorheriger Artikel"},
+			"figure":            {"Keine weiteren Abbildungen", "Keine vorherigen Abbildungen"},
+			"grouping":          {"Keine weitere Gruppierung", "Keine vorherige Gruppierung"},
+			"tab":               {"Keine weitere Registerkarte", "Keine vorherige Registerkarte"},
+			"menuItem":          {"Keine weiteren Menü-Elemente", "Keine vorherigen Menü-Elemente"},
+			"toggleButton":      {"Kein weiterer Umschalter", "Kein vorheriger Umschalter"},
+			"progressBar":       {"Keine weiteren Fortschrittsbalken", "Keine vorherigen Fortschrittsbalken"},
+			"reference":         {"Keine Unterstützung in diesem Dokument", "Keine Unterstützung in diesem Dokument"},
+			"math":              {"Keine weiteren mathematischen Formeln", "Keine vorherigen mathematischen Formeln"},
+			"verticalParagraph": {"Keine weiteren vertikal ausgerichteten Absätze", "Keine vorherigen vertikal ausgerichteten Absätze"},
+			"sameStyle":         {"Keine weiteren Texte des gleichen Stils", "Keine vorherigen Texte des gleichen Stils"},
+			"differentStyle":    {"Keine weiteren Texte unterschiedlichen Stils", "Keine vorherigen Texte unterschiedlichen Stils"},
 		},
 	}
 	for locale, targets := range want {
@@ -219,8 +275,25 @@ func TestChromiumInternalFrameMatchesFrameNavigation(t *testing.T) {
 func TestEnglishLandmarkPresentationUsesSemanticRole(t *testing.T) {
 	presenter, _ := NewPresenter("en-US")
 	got := presenter.Present(&model.Node{Role: "landmark", Attributes: map[string]string{"xml-roles": "main"}, States: map[string]bool{"enabled": true}}, "quickNavigation")
-	if got.Speech != "main landmark" {
-		t.Fatalf("speech = %q", got.Speech)
+	if got.Speech != "main landmark" || got.Braille != "lmk main" {
+		t.Fatalf("presentation = %#v", got)
+	}
+}
+
+func TestContainerEntryPresentationsIncludeFirstReadableItem(t *testing.T) {
+	presenter, _ := NewPresenter("en-US")
+	first := &model.Node{Role: "heading", Name: "Checkout", HeadingLevel: 1, States: map[string]bool{"enabled": true}}
+	landmark := presenter.PresentLandmarkEntry(&model.Node{Role: "landmark", Attributes: map[string]string{"xml-roles": "main"}, States: map[string]bool{"enabled": true}}, first)
+	if landmark.Speech != "main landmark  Checkout  heading  level 1" || landmark.Braille != "lmk main Checkout h1" {
+		t.Fatalf("landmark = %#v", landmark)
+	}
+	list := presenter.PresentListEntry(
+		&model.Node{Role: "list", SetSize: 2, States: map[string]bool{"enabled": true}},
+		&model.Node{Role: "list item", Text: "• First item", States: map[string]bool{"enabled": true}},
+		2,
+	)
+	if list.Speech != "list  with 2 items  • First item" || list.Braille != "lst2 • First item" {
+		t.Fatalf("list = %#v", list)
 	}
 }
 
@@ -326,8 +399,38 @@ func TestDetailsAreAnnouncedWithoutLeakingTargetContent(t *testing.T) {
 }
 
 func TestFormFieldTargetIncludesGenericATSPIButtonRole(t *testing.T) {
-	if !MatchTarget("formField")(&model.Node{Role: "button"}) {
-		t.Fatal("generic AT-SPI button must be reachable by form-field navigation")
+	for _, role := range []string{"button", "page tab", "menu item"} {
+		if !MatchTarget("formField")(&model.Node{Role: role}) {
+			t.Fatalf("AT-SPI %s must be reachable by form-field navigation", role)
+		}
+	}
+}
+
+func TestAnnotationTargetAndPresentationCoverTrackedChanges(t *testing.T) {
+	for _, role := range []string{"annotation", "content insertion", "content deletion"} {
+		if !MatchTarget("annotation")(&model.Node{Role: role}) {
+			t.Fatalf("AT-SPI %s must be reachable by annotation navigation", role)
+		}
+	}
+	if MatchTarget("annotation")(&model.Node{Role: "section", Attributes: map[string]string{"xml-roles": "comment"}}) {
+		t.Fatal("ARIA comment is not an NVDA annotation quick-navigation target")
+	}
+	presenter, _ := NewPresenter("en-US")
+	got := presenter.Present(&model.Node{Role: "content insertion", Text: "Added", States: map[string]bool{"enabled": true}}, "quickNavigation")
+	if got.Speech != "Added  inserted" || got.Braille != "Added ins" {
+		t.Fatalf("insertion presentation = %#v", got)
+	}
+}
+
+func TestChromiumQuickNavigationExcludesSelectOptionsAndReferences(t *testing.T) {
+	if MatchTarget("menuItem")(&model.Node{Role: "menu item", Attributes: map[string]string{"tag": "option"}}) {
+		t.Fatal("collapsed select option must not be treated as a browse-mode menu item")
+	}
+	if !MatchTarget("menuItem")(&model.Node{Role: "menu item", Attributes: map[string]string{"tag": "button"}}) {
+		t.Fatal("ARIA menu item must remain reachable")
+	}
+	if MatchTarget("reference")(&model.Node{Role: "link", Attributes: map[string]string{"xml-roles": "doc-biblioref"}}) {
+		t.Fatal("Chromium NVDA profile must report reference navigation as unsupported")
 	}
 }
 
@@ -343,6 +446,18 @@ func TestTextParagraphTargetMatchesPinnedNVDADefaultRegex(t *testing.T) {
 		if !MatchTarget("textParagraph")(&model.Node{Role: "paragraph", Text: text}) {
 			t.Errorf("expected match for %q", text)
 		}
+	}
+	article := &model.Node{Role: "article", Name: "Article label", Text: "Article sentence."}
+	if !MatchTarget("textParagraph")(article) {
+		t.Fatal("article text must be reachable by text-paragraph navigation")
+	}
+	presenter, _ := NewPresenter("en-US")
+	if got := presenter.PresentTextParagraph(article); got.Speech != "Article sentence." {
+		t.Fatalf("article paragraph presentation = %#v", got)
+	}
+	labelledArticle := &model.Node{Role: "article", Name: "Some name.", Text: "\ufffc\ufffc"}
+	if MatchTarget("textParagraph")(labelledArticle) {
+		t.Fatal("article accessible name must not be mistaken for body paragraph text")
 	}
 	for _, text := range []string{"Header", "Liberal MP: 1904–1908", ".", "…", "5.", "test....", "a.b"} {
 		if MatchTarget("textParagraph")(&model.Node{Role: "paragraph", Text: text}) {
