@@ -1996,12 +1996,19 @@ func TestLiveRegionResolvesInheritedAtomicContainerAndRelevantKinds(t *testing.T
 	// graph refresh. The direct object still identifies its live container
 	// through MEMBER_OF; BrowserGraph exposes the current active-document pair.
 	staleGraph := *engine.graph
-	staleGraph.Nodes = make(map[model.ObjectID]*model.Node, len(engine.graph.Nodes)-2)
+	staleGraph.Nodes = make(map[model.ObjectID]*model.Node, len(engine.graph.Nodes)-1)
 	for id, node := range engine.graph.Nodes {
-		if id != atomic && id != atomicValue {
+		if id != atomicValue {
 			staleGraph.Nodes[id] = node
 		}
 	}
+	// Object paths can be reused while Chromium replaces its accessibility
+	// subtree. Presence alone cannot establish that the cached candidate is the
+	// live owner nominated by the descendant's MEMBER_OF relation.
+	staleOwner := *graph.Nodes[atomic]
+	staleOwner.Children = nil
+	staleOwner.Attributes = map[string]string{"live": "off"}
+	staleGraph.Nodes[atomic] = &staleOwner
 	engine.graph = &staleGraph
 	// Chromium can expose one stale active-document traversal immediately after
 	// the mutation event. The bounded owner refresh must retry and require the

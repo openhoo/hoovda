@@ -2727,7 +2727,8 @@ func (e *Engine) liveRegionMetadata(ctx context.Context, node *model.Node) (live
 				if !candidate.Valid() {
 					continue
 				}
-				if graph.Nodes[candidate] != nil {
+				owner := graph.Nodes[candidate]
+				if owner != nil && slices.Contains(owner.Children, node.ID) && definesLiveRegion(owner) {
 					parent = candidate
 					break
 				}
