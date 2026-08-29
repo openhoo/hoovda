@@ -2869,6 +2869,21 @@ func (e *Engine) handleLiveTextChange(ctx context.Context, native NativeEvent) {
 		return
 	}
 	metadata, live := e.liveRegionMetadata(ctx, node)
+	containerID := ""
+	if metadata.container != nil {
+		containerID = metadata.container.ID.String()
+	}
+	e.logger.Info(
+		"live text metadata",
+		"source", native.Source.String(),
+		"direct_atomic", node.Attributes["atomic"],
+		"inherited_atomic", node.Attributes["container-atomic"],
+		"direct_live", node.Attributes["live"],
+		"inherited_live", node.Attributes["container-live"],
+		"resolved_live", live,
+		"resolved_atomic", metadata.atomic,
+		"resolved_container", containerID,
+	)
 	if !live {
 		return
 	}
