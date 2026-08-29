@@ -628,6 +628,14 @@ func (e *Engine) refreshIfDirty(ctx context.Context) error {
 	return e.Refresh(ctx)
 }
 
+// RefreshState resolves document and focus metadata invalidated by native
+// accessibility events before the control API exposes it. Commands already do
+// this on graph-dependent execution paths; state reads need the same guarantee
+// because a newly loaded Chromium document can initially have an empty name.
+func (e *Engine) RefreshState(ctx context.Context) error {
+	return e.refreshIfDirty(ctx)
+}
+
 func (e *Engine) navigate(command profile.Command) error {
 	e.mu.Lock()
 	graph, current := e.graph, e.cursor.Object

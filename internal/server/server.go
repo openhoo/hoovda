@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -166,10 +167,18 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.lookupActive(w, r.PathValue("session")); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.stateResult())
+	result, err := s.stateResult(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "state_refresh", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) stateResult() StateResult {
+func (s *Server) stateResult(ctx context.Context) (StateResult, error) {
+	if err := s.engine.RefreshState(ctx); err != nil {
+		return StateResult{}, fmt.Errorf("refresh accessibility state: %w", err)
+	}
 	state := s.engine.State()
 	nodes := s.engine.DocumentSnapshot()
 	byID := make(map[model.ObjectID]*model.Node, len(nodes))
@@ -192,7 +201,7 @@ func (s *Server) stateResult() StateResult {
 	if state.MousePositionKnown {
 		result.Mouse = &RuntimeMouse{X: state.MouseX, Y: state.MouseY, Object: runtimeObject(nodeAtPoint(nodes, state.MouseX, state.MouseY))}
 	}
-	return result
+	return result, nil
 }
 
 func runtimeObject(node *model.Node) *RuntimeObject {
@@ -207,6 +216,9 @@ func runtimeObject(node *model.Node) *RuntimeObject {
 		result.Redacted = true
 	} else if name := strings.TrimSpace(node.Name); name != "" {
 		result.Name = &name
+	}
+	if (node.Role == "document web" || node.Role == "document frame") && strings.TrimSpace(node.Attributes["url"]) != "" {
+		result.DocumentURLSHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte(node.Attributes["url"])))
 	}
 	if strings.Contains(strings.ToLower(node.Role), "link") {
 		visited := node.HasState("visited")
@@ -438,7 +450,12 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resultEvents = filterActionResultEvents(resultEvents, command.ID, startedSequence)
-	writeJSON(w, http.StatusOK, ActionResult{Command: command.ID, Gesture: gesture, Delivery: delivery, BeforeSequence: before, Cursor: cursor, TimedOut: timedOut, Events: resultEvents, State: s.stateResult()})
+	state, err := s.stateResult(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "state_refresh", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ActionResult{Command: command.ID, Gesture: gesture, Delivery: delivery, BeforeSequence: before, Cursor: cursor, TimedOut: timedOut, Events: resultEvents, State: state})
 }
 
 func filterActionResultEvents(result []events.Event, commandID string, startedSequence uint64) []events.Event {
@@ -449,8 +466,14 @@ func filterActionResultEvents(result []events.Event, commandID string, startedSe
 
 func commandNeedsNativeFocus(commandID string, observed []events.Event) bool {
 	switch commandID {
-	case "nextFocusable", "previousFocusable", "returnToPage":
+	case "nextFocusable", "previousFocusable":
 		return true
+	case "returnToPage":
+		// F6 is a focus-ring cycle gesture. Chromium legitimately emits no new
+		// native event when the selected stop is unchanged. The client helper
+		// verifies web-content focus through refreshed state and retries the
+		// gesture; rejecting the raw delivery here prevents that verification.
+		return false
 	case "exitEmbeddedObject":
 		for _, event := range observed {
 			if event.CausalCommand == commandID && event.Reason == "embeddedObjectExit" {

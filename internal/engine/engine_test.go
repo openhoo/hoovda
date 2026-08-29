@@ -1739,6 +1739,12 @@ func TestDocumentLoadInvalidatesGraphAndTargetsNewDocument(t *testing.T) {
 	for engine.State().Focus != newRoot && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
+	if err := engine.RefreshState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.State(); got.GraphRevision != 2 || got.Focus != newRoot {
+		t.Fatalf("refreshed state = %#v", got)
+	}
 	if err := engine.ExecuteDirect(context.Background(), "nextHeading"); err != nil {
 		t.Fatal(err)
 	}

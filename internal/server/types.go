@@ -62,6 +62,7 @@ type RuntimeObject struct {
 	ID                     string           `json:"id,omitempty"`
 	Role                   *string          `json:"role"`
 	Name                   *string          `json:"name"`
+	DocumentURLSHA256      string           `json:"documentUrlSha256,omitempty"`
 	Location               *RuntimeLocation `json:"location"`
 	Visited                *bool            `json:"visited,omitempty"`
 	Redacted               bool             `json:"redacted,omitempty"`

@@ -118,6 +118,12 @@ func (i failedCommandInjector) Press(_ context.Context, _ string) error {
 
 func testServer(t *testing.T) *Server {
 	t.Helper()
+	server, _ := testServerWithAccess(t)
+	return server
+}
+
+func testServerWithAccess(t *testing.T) (*Server, *fakeAccess) {
+	t.Helper()
 	root := model.ObjectID{Bus: "app", Path: "/root"}
 	heading := model.ObjectID{Bus: "app", Path: "/heading"}
 	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
@@ -130,7 +136,8 @@ func testServer(t *testing.T) *Server {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := events.NewStore(1000)
 	presenter, _ := profile.NewPresenter("en-US")
-	screenreader := engine.New(&fakeAccess{graph: graph, events: make(chan engine.NativeEvent)}, store, presenter, braille.Passthrough{}, synth.Silence{SampleRate: 22_050}, nil, logger, engine.Config{Locale: "en-US", KeyboardLayout: "desktop"})
+	access := &fakeAccess{graph: graph, events: make(chan engine.NativeEvent, 10)}
+	screenreader := engine.New(access, store, presenter, braille.Passthrough{}, synth.Silence{SampleRate: 22_050}, nil, logger, engine.Config{Locale: "en-US", KeyboardLayout: "desktop"})
 	if err := screenreader.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +149,7 @@ func testServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return result
+	return result, access
 }
 
 func request(t *testing.T, server *Server, method, path string, body any, token string) *httptest.ResponseRecorder {
@@ -308,6 +315,43 @@ func TestStateReturnsEnrichedRuntimeObjects(t *testing.T) {
 	}
 }
 
+func TestStateRefreshesDirtyDocumentMetadata(t *testing.T) {
+	server, access := testServerWithAccess(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "state-refresh"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	root := access.graph.Root
+	updated, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root: {
+			ID: root, Role: "document web", Name: "Updated fixture",
+			States: map[string]bool{"enabled": true, "focused": true, "showing": true},
+		},
+	}, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access.graph = updated
+	access.events <- engine.NativeEvent{Name: "org.a11y.atspi.Event.Document.LoadComplete", Source: root}
+	deadline := time.Now().Add(time.Second)
+	for server.engine.State().Focus != root && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	response := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/state", nil, "test-secret")
+	if response.Code != http.StatusOK {
+		t.Fatalf("state status = %d body=%s", response.Code, response.Body.String())
+	}
+	var state StateResult
+	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.GraphRevision != 8 || state.Focus == nil || state.Focus.Name == nil || *state.Focus.Name != "Updated fixture" {
+		t.Fatalf("state = %#v body=%s", state, response.Body.String())
+	}
+}
+
 func TestRuntimeObjectDoesNotExposeProtectedValue(t *testing.T) {
 	node := &model.Node{
 		ID:        model.ObjectID{Bus: "app", Path: "/password"},
@@ -326,6 +370,26 @@ func TestRuntimeObjectDoesNotExposeProtectedValue(t *testing.T) {
 	}
 	if bytes.Contains(encoded, []byte("DO_NOT_LEAK")) || bytes.Contains(encoded, []byte("Password")) {
 		t.Fatalf("protected runtime object leaked content: %s", encoded)
+	}
+}
+
+func TestRuntimeObjectHashesDocumentURL(t *testing.T) {
+	node := &model.Node{
+		ID:         model.ObjectID{Bus: "app", Path: "/document"},
+		Role:       "document web",
+		Name:       "Checkout",
+		Attributes: map[string]string{"url": "https://example.test/checkout?token=secret"},
+	}
+	result := runtimeObject(node)
+	if result == nil || result.DocumentURLSHA256 != "5db530ec6088c907ba40b8a1a226d06c0263d788d373cb3970653fc038d0bddf" {
+		t.Fatalf("document runtime object = %#v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("example.test")) || bytes.Contains(encoded, []byte("secret")) {
+		t.Fatalf("document URL leaked from runtime object: %s", encoded)
 	}
 }
 
@@ -551,6 +615,9 @@ func TestExitEmbeddedObjectRequiresFocusOnlyForActualBoundaryExit(t *testing.T) 
 	}
 	if !commandNeedsNativeFocus("nextFocusable", nil) {
 		t.Fatal("focus traversal must always retain native focus proof")
+	}
+	if commandNeedsNativeFocus("returnToPage", nil) {
+		t.Fatal("F6 focus-ring cycling must let the client verify and retry an unchanged stop")
 	}
 }
 
