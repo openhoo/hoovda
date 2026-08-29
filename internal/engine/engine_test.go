@@ -2046,6 +2046,18 @@ func TestLiveRegionResolvesInheritedAtomicContainerAndRelevantKinds(t *testing.T
 	}
 
 	before = store.Cursor()
+	freshAtomicValue.Attributes = map[string]string{"container-live": "polite"}
+	freshAtomicValue.Text = "cached"
+	readsBeforeCache := access.graphReads
+	engine.handleLiveTextChange(ctx, NativeEvent{Name: "TextChanged", Source: atomicValue, Detail: "insert", Value: "cached"})
+	if got := speechAfter(t, store, before); got != "Atomic total cached" {
+		t.Fatalf("cached atomic descendant speech = %q", got)
+	}
+	if access.graphReads != readsBeforeCache {
+		t.Fatalf("cached atomic owner triggered %d graph refreshes", access.graphReads-readsBeforeCache)
+	}
+
+	before = store.Cursor()
 	engine.handleLiveTextChange(ctx, NativeEvent{Name: "TextChanged", Source: added, Detail: "insert", Value: "changed text"})
 	if next, _, snapshotErr := store.Snapshot(before, "test"); snapshotErr != nil || slices.ContainsFunc(next, func(event events.Event) bool { return event.Text == "changed text" }) {
 		t.Fatalf("additions-only region emitted text change: events=%#v err=%v", next, snapshotErr)

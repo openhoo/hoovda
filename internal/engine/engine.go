@@ -119,6 +119,7 @@ type Engine struct {
 	activeAction            string
 	recentLiveRegions       map[liveRegionAnnouncement]time.Time
 	liveRegionKnown         map[model.ObjectID]bool
+	atomicLiveRegionOwners  map[model.ObjectID]model.ObjectID
 	findQuery               string
 	synthCancel             context.CancelFunc
 	synthDone               <-chan struct{}
@@ -301,6 +302,7 @@ func (e *Engine) BeginSession(id string) error {
 	e.presentationBaseline = baseline
 	e.presentationBaselineSet = true
 	e.recentLiveRegions = make(map[liveRegionAnnouncement]time.Time)
+	e.atomicLiveRegionOwners = make(map[model.ObjectID]model.ObjectID)
 	return nil
 }
 
@@ -2850,6 +2852,38 @@ func definesLiveRegion(node *model.Node) bool {
 	}
 }
 
+func isAtomicLiveRegionOwner(node *model.Node) bool {
+	return definesLiveRegion(node) && (strings.EqualFold(node.Attributes["atomic"], "true") || strings.EqualFold(node.Attributes["container-atomic"], "true"))
+}
+
+func (e *Engine) cachedAtomicLiveRegionOwner(sourceID model.ObjectID) *model.Node {
+	e.mu.RLock()
+	ownerID := e.atomicLiveRegionOwners[sourceID]
+	graph := e.graph
+	var owner *model.Node
+	if graph != nil {
+		owner = graph.Nodes[ownerID]
+	}
+	e.mu.RUnlock()
+	if !ownerID.Valid() || !isAtomicLiveRegionOwner(owner) {
+		return nil
+	}
+	return owner
+}
+
+func (e *Engine) resolvedLiveRegionMetadata(ctx context.Context, node *model.Node) (liveRegionMetadata, bool) {
+	if node != nil {
+		if owner := e.cachedAtomicLiveRegionOwner(node.ID); owner != nil {
+			metadata, live := e.liveRegionMetadata(ctx, owner)
+			if live {
+				metadata.atomic, metadata.container, metadata.containerOwned = true, owner, true
+			}
+			return metadata, live
+		}
+	}
+	return e.liveRegionMetadata(ctx, node)
+}
+
 func liveRelevant(value string) map[string]bool {
 	result := map[string]bool{}
 	for _, token := range strings.Fields(strings.ToLower(value)) {
@@ -2868,7 +2902,7 @@ func (e *Engine) handleLiveTextChange(ctx context.Context, native NativeEvent) {
 	if err != nil {
 		return
 	}
-	metadata, live := e.liveRegionMetadata(ctx, node)
+	metadata, live := e.resolvedLiveRegionMetadata(ctx, node)
 	containerID := ""
 	if metadata.container != nil {
 		containerID = metadata.container.ID.String()
@@ -2920,7 +2954,7 @@ func (e *Engine) handleLiveChildrenChange(ctx context.Context, native NativeEven
 	if err != nil {
 		return
 	}
-	metadata, live := e.liveRegionMetadata(ctx, node)
+	metadata, live := e.resolvedLiveRegionMetadata(ctx, node)
 	if !live {
 		return
 	}
@@ -2991,7 +3025,7 @@ func (e *Engine) handleLivePropertyChange(ctx context.Context, native NativeEven
 	if err != nil {
 		return
 	}
-	metadata, live := e.liveRegionMetadata(ctx, node)
+	metadata, live := e.resolvedLiveRegionMetadata(ctx, node)
 	if !live || !metadata.relevant["text"] {
 		return
 	}
@@ -3049,6 +3083,16 @@ func (e *Engine) readLiveRegionContent(ctx context.Context, container *model.Nod
 				queue = append(queue, child)
 			}
 		}
+	}
+	if isAtomicLiveRegionOwner(root) {
+		e.mu.Lock()
+		if e.atomicLiveRegionOwners == nil {
+			e.atomicLiveRegionOwners = make(map[model.ObjectID]model.ObjectID, len(seen))
+		}
+		for id := range seen {
+			e.atomicLiveRegionOwners[id] = root.ID
+		}
+		e.mu.Unlock()
 	}
 	return root, strings.Join(parts, " ")
 }
