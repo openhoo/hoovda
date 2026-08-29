@@ -709,7 +709,9 @@ func (s *Server) recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if value := recover(); value != nil {
-				s.logger.Error("HTTP handler panic", "value", value, "method", r.Method, "path", r.URL.Path)
+				// Request data and panic values can contain control characters. Keep
+				// recovery logs useful without allowing an attacker to forge entries.
+				s.logger.Error("HTTP handler panic", "value_type", fmt.Sprintf("%T", value))
 				writeError(w, http.StatusInternalServerError, "internal", errors.New("internal server error"))
 			}
 		}()

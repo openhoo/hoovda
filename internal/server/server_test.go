@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,31 @@ import (
 	"github.com/openhoo/hoovda/internal/recording"
 	"github.com/openhoo/hoovda/internal/synth"
 )
+
+func TestRecoverDoesNotLogAttackerControlledValues(t *testing.T) {
+	var logs bytes.Buffer
+	server := &Server{logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	handler := server.recover(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		panic(request.URL.Path)
+	}))
+	request := &http.Request{
+		Method: "GET\nlevel=ERROR msg=forged",
+		URL:    &url.URL{Path: "/safe\nlevel=ERROR msg=forged"},
+	}
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(logs.String(), "forged") {
+		t.Fatalf("recovery log contains attacker-controlled value: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), "value_type=string") {
+		t.Fatalf("recovery log lacks safe diagnostic type: %q", logs.String())
+	}
+}
 
 type fakeAccess struct {
 	graph  *model.Graph
