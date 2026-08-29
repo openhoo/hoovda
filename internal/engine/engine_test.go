@@ -2039,3 +2039,45 @@ func TestLiveRegionResolvesInheritedAtomicContainerAndRelevantKinds(t *testing.T
 		t.Fatalf("container-sourced addition speech = %q", got)
 	}
 }
+
+func TestLiveRegionSkipsRefreshForNonAtomicUnresolvedMember(t *testing.T) {
+	root := model.ObjectID{Bus: "app", Path: "/root"}
+	source := model.ObjectID{Bus: "app", Path: "/dynamic-value"}
+	missingOwner := model.ObjectID{Bus: "app", Path: "/stale-owner"}
+	graph, err := model.NewGraph(root, map[model.ObjectID]*model.Node{
+		root: {ID: root, Role: "document web"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := &fakeAccess{
+		graph: graph,
+		readNodes: map[model.ObjectID]*model.Node{
+			source: {
+				ID: source, Role: "static", Text: "Saved",
+				Attributes: map[string]string{"container-live": "polite"},
+				Relations:  map[string][]model.ObjectID{"member of": {missingOwner}},
+			},
+		},
+		events: make(chan NativeEvent, 1),
+	}
+	store := events.NewStore(100)
+	presenter, _ := profile.NewPresenter("en-US")
+	engine := New(access, store, presenter, braille.Passthrough{}, synth.Silence{SampleRate: 22050}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), Config{Locale: "en-US", KeyboardLayout: "desktop"})
+	ctx := context.Background()
+	if err := engine.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.BeginSession("test"); err != nil {
+		t.Fatal(err)
+	}
+
+	before := store.Cursor()
+	engine.handleLiveTextChange(ctx, NativeEvent{Name: "TextChanged", Source: source, Detail: "insert", Value: "Saved"})
+	if got := speechAfter(t, store, before); got != "Saved" {
+		t.Fatalf("non-atomic descendant speech = %q", got)
+	}
+	if access.graphReads != 1 {
+		t.Fatalf("graph refreshes = %d, want startup only", access.graphReads)
+	}
+}

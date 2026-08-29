@@ -2731,6 +2731,13 @@ func (e *Engine) liveRegionMetadata(ctx context.Context, node *model.Node) (live
 					parent = candidate
 					break
 				}
+				// A refresh is needed only to recover an atomic container's full
+				// text. Non-atomic descendants already carry enough inherited
+				// metadata for direct output, and refreshing their unrelated or
+				// stale MEMBER_OF targets makes ordinary navigation unbounded.
+				if !metadata.atomic {
+					continue
+				}
 				if refreshed := e.refreshForLiveRegionOwner(ctx, node.ID, candidate); refreshed != nil {
 					graph, parent = refreshed, candidate
 					break
