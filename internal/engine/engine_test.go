@@ -19,6 +19,7 @@ import (
 
 type fakeAccess struct {
 	graph       *model.Graph
+	graphAtRead func(int) *model.Graph
 	readNodes   map[model.ObjectID]*model.Node
 	events      chan NativeEvent
 	graphReads  int
@@ -33,6 +34,9 @@ func (f *fakeAccess) BrowserGraph(ctx context.Context, _ string, _ model.ObjectI
 	if f.blockGraphs {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if f.graphAtRead != nil {
+		return f.graphAtRead(f.graphReads), nil
 	}
 	return f.graph, nil
 }
@@ -1999,12 +2003,21 @@ func TestLiveRegionResolvesInheritedAtomicContainerAndRelevantKinds(t *testing.T
 		}
 	}
 	engine.graph = &staleGraph
+	// Chromium can expose one stale active-document traversal immediately after
+	// the mutation event. The bounded owner refresh must retry and require the
+	// owner/child backlink before resolving the atomic container.
+	access.graphAtRead = func(read int) *model.Graph {
+		if read == 2 {
+			return &staleGraph
+		}
+		return graph
+	}
 	engine.handleLiveTextChange(ctx, NativeEvent{Name: "TextChanged", Source: atomicValue, Detail: "insert", Value: "ready"})
 	if got := speechAfter(t, store, before); got != "Atomic total ready" {
 		t.Fatalf("atomic descendant speech = %q", got)
 	}
-	if access.graphReads != 2 {
-		t.Fatalf("graph refreshes = %d, want startup plus live-owner refresh", access.graphReads)
+	if access.graphReads != 3 {
+		t.Fatalf("graph refreshes = %d, want startup plus two live-owner attempts", access.graphReads)
 	}
 
 	before = store.Cursor()

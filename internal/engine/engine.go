@@ -2758,23 +2758,40 @@ func (e *Engine) liveRegionMetadata(ctx context.Context, node *model.Node) (live
 
 func (e *Engine) refreshForLiveRegionOwner(ctx context.Context, childID, ownerID model.ObjectID) *model.Graph {
 	refreshCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	err := e.Refresh(refreshCtx)
-	cancel()
-	if err != nil {
-		e.logger.Debug("refresh graph for live-region owner", "error", err)
-		return nil
+	defer cancel()
+	// Chromium can publish the descendant TextChanged event before one
+	// BrowserGraph traversal contains the descendant/owner pair. Retry a small,
+	// fixed number of times inside one deadline; accepting the relation still
+	// requires an active-document graph with the owner's child backlink.
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := e.Refresh(refreshCtx); err != nil {
+			e.logger.Debug("refresh graph for live-region owner", "attempt", attempt+1, "error", err)
+			if refreshCtx.Err() != nil {
+				return nil
+			}
+		} else {
+			e.mu.RLock()
+			graph := e.graph
+			var owner *model.Node
+			if graph != nil {
+				owner = graph.Nodes[ownerID]
+			}
+			e.mu.RUnlock()
+			if owner != nil && slices.Contains(owner.Children, childID) && definesLiveRegion(owner) {
+				return graph
+			}
+		}
+		if attempt < 2 {
+			timer := time.NewTimer(time.Duration(attempt+1) * 25 * time.Millisecond)
+			select {
+			case <-refreshCtx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+		}
 	}
-	e.mu.RLock()
-	graph := e.graph
-	var owner *model.Node
-	if graph != nil {
-		owner = graph.Nodes[ownerID]
-	}
-	e.mu.RUnlock()
-	if owner == nil || !slices.Contains(owner.Children, childID) || !definesLiveRegion(owner) {
-		return nil
-	}
-	return graph
+	return nil
 }
 
 func definesLiveRegion(node *model.Node) bool {
