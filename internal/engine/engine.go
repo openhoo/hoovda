@@ -2663,6 +2663,10 @@ type liveRegionMetadata struct {
 }
 
 func (e *Engine) liveRegionMetadata(ctx context.Context, node *model.Node) (liveRegionMetadata, bool) {
+	sourceID := model.ObjectID{}
+	if node != nil {
+		sourceID = node.ID
+	}
 	e.mu.RLock()
 	graph := e.graph
 	e.mu.RUnlock()
@@ -2732,17 +2736,9 @@ func (e *Engine) liveRegionMetadata(ctx context.Context, node *model.Node) (live
 					parent = candidate
 					break
 				}
-				// A refresh is needed only to recover an atomic container's full
-				// text. Non-atomic descendants already carry enough inherited
-				// metadata for direct output, and refreshing their unrelated or
-				// stale MEMBER_OF targets makes ordinary navigation unbounded.
-				if !metadata.atomic {
-					continue
-				}
-				if refreshed := e.refreshForLiveRegionOwner(ctx, node.ID, candidate); refreshed != nil {
-					graph, parent = refreshed, candidate
-					break
-				}
+				// Atomic recovery happens once after the cached ancestor walk. A
+				// single bounded path also covers temporarily missing MEMBER_OF;
+				// non-atomic descendants already contain their complete output.
 			}
 		}
 		if !parent.Valid() {
@@ -2751,13 +2747,22 @@ func (e *Engine) liveRegionMetadata(ctx context.Context, node *model.Node) (live
 		node = graph.Nodes[parent]
 	}
 	if inheritedPriority != "" {
+		if metadata.atomic {
+			// The direct AT-SPI object can temporarily omit MEMBER_OF while the
+			// active graph still has, or soon acquires, the complete parent chain.
+			// Recover only a backlink-validated owner inside that active document.
+			if _, owner := e.refreshForLiveRegionOwner(ctx, sourceID); owner != nil {
+				metadata.priority, metadata.container, metadata.containerOwned = inheritedPriority, owner, true
+				return metadata, true
+			}
+		}
 		metadata.priority, metadata.container = inheritedPriority, inheritedContainer
 		return metadata, true
 	}
 	return liveRegionMetadata{}, false
 }
 
-func (e *Engine) refreshForLiveRegionOwner(ctx context.Context, childID, ownerID model.ObjectID) *model.Graph {
+func (e *Engine) refreshForLiveRegionOwner(ctx context.Context, childID model.ObjectID) (*model.Graph, *model.Node) {
 	refreshCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	// Chromium can publish the descendant TextChanged event before one
@@ -2768,18 +2773,14 @@ func (e *Engine) refreshForLiveRegionOwner(ctx context.Context, childID, ownerID
 		if err := e.Refresh(refreshCtx); err != nil {
 			e.logger.Debug("refresh graph for live-region owner", "attempt", attempt+1, "error", err)
 			if refreshCtx.Err() != nil {
-				return nil
+				return nil, nil
 			}
 		} else {
 			e.mu.RLock()
 			graph := e.graph
-			var owner *model.Node
-			if graph != nil {
-				owner = graph.Nodes[ownerID]
-			}
 			e.mu.RUnlock()
-			if owner != nil && slices.Contains(owner.Children, childID) && definesLiveRegion(owner) {
-				return graph
+			if owner := liveRegionOwnerInGraph(graph, childID); owner != nil {
+				return graph, owner
 			}
 		}
 		if attempt < 2 {
@@ -2787,10 +2788,48 @@ func (e *Engine) refreshForLiveRegionOwner(ctx context.Context, childID, ownerID
 			select {
 			case <-refreshCtx.Done():
 				timer.Stop()
-				return nil
+				return nil, nil
 			case <-timer.C:
 			}
 		}
+	}
+	return nil, nil
+}
+
+func liveRegionOwnerInGraph(graph *model.Graph, childID model.ObjectID) *model.Node {
+	if graph == nil {
+		return nil
+	}
+	validOwner := func(ownerID, directChildID model.ObjectID) *model.Node {
+		owner := graph.Nodes[ownerID]
+		if owner == nil || !slices.Contains(owner.Children, directChildID) || !definesLiveRegion(owner) {
+			return nil
+		}
+		return owner
+	}
+	child := graph.Nodes[childID]
+	if child == nil {
+		return nil
+	}
+	for _, candidate := range child.Relations["member of"] {
+		if owner := validOwner(candidate, childID); owner != nil {
+			return owner
+		}
+	}
+	current := child
+	for steps := 0; current != nil && steps < 512; steps++ {
+		parentID := current.Parent
+		if !parentID.Valid() {
+			return nil
+		}
+		parent := graph.Nodes[parentID]
+		if parent == nil || !slices.Contains(parent.Children, current.ID) {
+			return nil
+		}
+		if definesLiveRegion(parent) {
+			return parent
+		}
+		current = parent
 	}
 	return nil
 }

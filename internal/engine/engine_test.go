@@ -2028,6 +2028,24 @@ func TestLiveRegionResolvesInheritedAtomicContainerAndRelevantKinds(t *testing.T
 	}
 
 	before = store.Cursor()
+	freshAtomicValue.Relations = nil
+	freshAtomicValue.Text = "done"
+	engine.graph = &staleGraph
+	access.graphAtRead = func(read int) *model.Graph {
+		if read == 4 {
+			return &staleGraph
+		}
+		return graph
+	}
+	engine.handleLiveTextChange(ctx, NativeEvent{Name: "TextChanged", Source: atomicValue, Detail: "insert", Value: "done"})
+	if got := speechAfter(t, store, before); got != "Atomic total done" {
+		t.Fatalf("relationless atomic descendant speech = %q", got)
+	}
+	if access.graphReads != 5 {
+		t.Fatalf("relationless graph refreshes = %d, want two bounded owner attempts", access.graphReads)
+	}
+
+	before = store.Cursor()
 	engine.handleLiveTextChange(ctx, NativeEvent{Name: "TextChanged", Source: added, Detail: "insert", Value: "changed text"})
 	if next, _, snapshotErr := store.Snapshot(before, "test"); snapshotErr != nil || slices.ContainsFunc(next, func(event events.Event) bool { return event.Text == "changed text" }) {
 		t.Fatalf("additions-only region emitted text change: events=%#v err=%v", next, snapshotErr)
