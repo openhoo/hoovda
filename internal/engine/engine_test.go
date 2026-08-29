@@ -1988,12 +1988,23 @@ func TestLiveRegionResolvesInheritedAtomicContainerAndRelevantKinds(t *testing.T
 	}
 
 	before := store.Cursor()
-	// Simulate Chromium delivering a new text object before a graph refresh.
-	// The direct object still identifies its live container through MEMBER_OF.
-	delete(engine.graph.Nodes, atomicValue)
+	// Simulate Chromium delivering a new text object and owner before the cached
+	// graph refresh. The direct object still identifies its live container
+	// through MEMBER_OF; BrowserGraph exposes the current active-document pair.
+	staleGraph := *engine.graph
+	staleGraph.Nodes = make(map[model.ObjectID]*model.Node, len(engine.graph.Nodes)-2)
+	for id, node := range engine.graph.Nodes {
+		if id != atomic && id != atomicValue {
+			staleGraph.Nodes[id] = node
+		}
+	}
+	engine.graph = &staleGraph
 	engine.handleLiveTextChange(ctx, NativeEvent{Name: "TextChanged", Source: atomicValue, Detail: "insert", Value: "ready"})
 	if got := speechAfter(t, store, before); got != "Atomic total ready" {
 		t.Fatalf("atomic descendant speech = %q", got)
+	}
+	if access.graphReads != 2 {
+		t.Fatalf("graph refreshes = %d, want startup plus live-owner refresh", access.graphReads)
 	}
 
 	before = store.Cursor()

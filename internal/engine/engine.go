@@ -2662,7 +2662,7 @@ type liveRegionMetadata struct {
 	containerOwned bool
 }
 
-func (e *Engine) liveRegionMetadata(node *model.Node) (liveRegionMetadata, bool) {
+func (e *Engine) liveRegionMetadata(ctx context.Context, node *model.Node) (liveRegionMetadata, bool) {
 	e.mu.RLock()
 	graph := e.graph
 	e.mu.RUnlock()
@@ -2724,8 +2724,15 @@ func (e *Engine) liveRegionMetadata(node *model.Node) (liveRegionMetadata, bool)
 			// that window; use only a target already present in the graph so an
 			// unrelated relation cannot escape the active document.
 			for _, candidate := range node.Relations["member of"] {
-				if candidate.Valid() && graph.Nodes[candidate] != nil {
+				if !candidate.Valid() {
+					continue
+				}
+				if graph.Nodes[candidate] != nil {
 					parent = candidate
+					break
+				}
+				if refreshed := e.refreshForLiveRegionOwner(ctx, node.ID, candidate); refreshed != nil {
+					graph, parent = refreshed, candidate
 					break
 				}
 			}
@@ -2740,6 +2747,43 @@ func (e *Engine) liveRegionMetadata(node *model.Node) (liveRegionMetadata, bool)
 		return metadata, true
 	}
 	return liveRegionMetadata{}, false
+}
+
+func (e *Engine) refreshForLiveRegionOwner(ctx context.Context, childID, ownerID model.ObjectID) *model.Graph {
+	refreshCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	err := e.Refresh(refreshCtx)
+	cancel()
+	if err != nil {
+		e.logger.Debug("refresh graph for live-region owner", "error", err)
+		return nil
+	}
+	e.mu.RLock()
+	graph := e.graph
+	var owner *model.Node
+	if graph != nil {
+		owner = graph.Nodes[ownerID]
+	}
+	e.mu.RUnlock()
+	if owner == nil || !slices.Contains(owner.Children, childID) || !definesLiveRegion(owner) {
+		return nil
+	}
+	return graph
+}
+
+func definesLiveRegion(node *model.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(node.Attributes["live"])) {
+	case "assertive", "polite":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(node.Role)) {
+	case "alert", "statusbar", "status bar", "status", "log":
+		return true
+	default:
+		return false
+	}
 }
 
 func liveRelevant(value string) map[string]bool {
@@ -2760,7 +2804,7 @@ func (e *Engine) handleLiveTextChange(ctx context.Context, native NativeEvent) {
 	if err != nil {
 		return
 	}
-	metadata, live := e.liveRegionMetadata(node)
+	metadata, live := e.liveRegionMetadata(ctx, node)
 	if !live {
 		return
 	}
@@ -2797,7 +2841,7 @@ func (e *Engine) handleLiveChildrenChange(ctx context.Context, native NativeEven
 	if err != nil {
 		return
 	}
-	metadata, live := e.liveRegionMetadata(node)
+	metadata, live := e.liveRegionMetadata(ctx, node)
 	if !live {
 		return
 	}
@@ -2868,7 +2912,7 @@ func (e *Engine) handleLivePropertyChange(ctx context.Context, native NativeEven
 	if err != nil {
 		return
 	}
-	metadata, live := e.liveRegionMetadata(node)
+	metadata, live := e.liveRegionMetadata(ctx, node)
 	if !live || !metadata.relevant["text"] {
 		return
 	}
