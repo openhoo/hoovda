@@ -1963,6 +1963,7 @@ func TestLiveRegionResolvesInheritedAtomicContainerAndRelevantKinds(t *testing.T
 	freshAtomicValue := *graph.Nodes[atomicValue]
 	freshAtomicValue.Parent = model.ObjectID{}
 	freshAtomicValue.Text = "ready"
+	freshAtomicValue.Relations = map[string][]model.ObjectID{"member of": {atomic}}
 	dynamicNode := &model.Node{
 		ID: dynamic, Role: "static", Text: "Dynamic addition",
 		Attributes: map[string]string{"container-live": "polite", "container-relevant": "additions", "relevant": "additions text"},
@@ -1987,6 +1988,9 @@ func TestLiveRegionResolvesInheritedAtomicContainerAndRelevantKinds(t *testing.T
 	}
 
 	before := store.Cursor()
+	// Simulate Chromium delivering a new text object before a graph refresh.
+	// The direct object still identifies its live container through MEMBER_OF.
+	delete(engine.graph.Nodes, atomicValue)
 	engine.handleLiveTextChange(ctx, NativeEvent{Name: "TextChanged", Source: atomicValue, Detail: "insert", Value: "ready"})
 	if got := speechAfter(t, store, before); got != "Atomic total ready" {
 		t.Fatalf("atomic descendant speech = %q", got)

@@ -2717,6 +2717,19 @@ func (e *Engine) liveRegionMetadata(node *model.Node) (liveRegionMetadata, bool)
 		if cached := graph.Nodes[node.ID]; !parent.Valid() && cached != nil {
 			parent = cached.Parent
 		}
+		if !parent.Valid() && inheritedPriority != "" {
+			// A direct AT-SPI object read has no Parent. New live-region text
+			// objects can also arrive before the cached graph contains their ID.
+			// Chromium exposes the owning live container through MEMBER_OF in
+			// that window; use only a target already present in the graph so an
+			// unrelated relation cannot escape the active document.
+			for _, candidate := range node.Relations["member of"] {
+				if candidate.Valid() && graph.Nodes[candidate] != nil {
+					parent = candidate
+					break
+				}
+			}
+		}
 		if !parent.Valid() {
 			break
 		}
