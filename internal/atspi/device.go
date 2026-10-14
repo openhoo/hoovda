@@ -88,7 +88,7 @@ func (l *DeviceListener) run(ctx context.Context) {
 				timer.Stop()
 			case <-timer.C:
 			}
-			_, _ = l.handler(context.Background(), job.gesture)
+			_, _ = l.handler(ctx, job.gesture)
 		}
 	}
 }

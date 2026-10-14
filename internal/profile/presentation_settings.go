@@ -1,9 +1,11 @@
 package profile
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 )
 
@@ -121,6 +123,9 @@ func DefaultPresentationSettings() PresentationSettings {
 
 func (s PresentationSettings) Clone() PresentationSettings {
 	s.ReportSpellingErrors = slices.Clone(s.ReportSpellingErrors)
+	if s.ReportSpellingErrors == nil {
+		s.ReportSpellingErrors = []string{}
+	}
 	return s
 }
 
@@ -151,9 +156,39 @@ func (s PresentationSettings) Validate() error {
 }
 
 func (s *PresentationSettings) UnmarshalJSON(data []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
 		return err
+	}
+	if opening != json.Delim('{') {
+		return errors.New("presentation settings must be an object")
+	}
+	fields := make(map[string]json.RawMessage, len(presentationSettingKeys))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key := token.(string)
+		if _, exists := fields[key]; exists {
+			return fmt.Errorf("duplicate presentation setting %q", key)
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+		fields[key] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return errors.New("presentation settings contain trailing JSON")
 	}
 	if len(fields) != len(presentationSettingKeys) {
 		return fmt.Errorf("presentation settings must contain exactly %d fields", len(presentationSettingKeys))
@@ -161,6 +196,9 @@ func (s *PresentationSettings) UnmarshalJSON(data []byte) error {
 	for key := range fields {
 		if _, ok := presentationSettingKeys[key]; !ok {
 			return fmt.Errorf("unknown presentation setting %q", key)
+		}
+		if bytes.Equal(bytes.TrimSpace(fields[key]), []byte("null")) {
+			return fmt.Errorf("presentation setting %q must not be null", key)
 		}
 	}
 	type plain PresentationSettings

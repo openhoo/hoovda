@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,18 +51,40 @@ func TestRecoverDoesNotLogAttackerControlledValues(t *testing.T) {
 }
 
 type fakeAccess struct {
-	graph  *model.Graph
-	events chan engine.NativeEvent
+	graph          *model.Graph
+	events         chan engine.NativeEvent
+	action         func(context.Context, model.ObjectID) error
+	graphFailureMu sync.RWMutex
+	graphFailure   func(context.Context) error
 }
 
-func (f *fakeAccess) BrowserGraph(context.Context, string, model.ObjectID) (*model.Graph, error) {
+func (f *fakeAccess) BrowserGraph(ctx context.Context, _ string, _ model.ObjectID) (*model.Graph, error) {
+	f.graphFailureMu.RLock()
+	failure := f.graphFailure
+	f.graphFailureMu.RUnlock()
+	if failure != nil {
+		if err := failure(ctx); err != nil {
+			return nil, err
+		}
+	}
 	return f.graph, nil
+}
+
+func (f *fakeAccess) setGraphFailure(failure func(context.Context) error) {
+	f.graphFailureMu.Lock()
+	f.graphFailure = failure
+	f.graphFailureMu.Unlock()
 }
 func (f *fakeAccess) ReadNode(_ context.Context, id model.ObjectID) (*model.Node, error) {
 	return f.graph.Nodes[id], nil
 }
-func (f *fakeAccess) DoDefaultAction(context.Context, model.ObjectID) error { return nil }
-func (f *fakeAccess) GrabFocus(context.Context, model.ObjectID) error       { return nil }
+func (f *fakeAccess) DoDefaultAction(ctx context.Context, id model.ObjectID) error {
+	if f.action != nil {
+		return f.action(ctx, id)
+	}
+	return nil
+}
+func (f *fakeAccess) GrabFocus(context.Context, model.ObjectID) error { return nil }
 func (f *fakeAccess) SetTextSelection(context.Context, model.ObjectID, int, int) error {
 	return nil
 }
@@ -123,6 +146,10 @@ func testServer(t *testing.T) *Server {
 }
 
 func testServerWithAccess(t *testing.T) (*Server, *fakeAccess) {
+	return testServerWithSynth(t, synth.Silence{SampleRate: 22_050})
+}
+
+func testServerWithSynth(t *testing.T, driver synth.Driver, ffmpeg ...string) (*Server, *fakeAccess) {
 	t.Helper()
 	root := model.ObjectID{Bus: "app", Path: "/root"}
 	heading := model.ObjectID{Bus: "app", Path: "/heading"}
@@ -137,15 +164,21 @@ func testServerWithAccess(t *testing.T) (*Server, *fakeAccess) {
 	store := events.NewStore(1000)
 	presenter, _ := profile.NewPresenter("en-US")
 	access := &fakeAccess{graph: graph, events: make(chan engine.NativeEvent, 10)}
-	screenreader := engine.New(access, store, presenter, braille.Passthrough{}, synth.Silence{SampleRate: 22_050}, nil, logger, engine.Config{Locale: "en-US", KeyboardLayout: "desktop"})
-	if err := screenreader.Start(context.Background()); err != nil {
-		t.Fatal(err)
+	recordingConfig := recording.Config{Root: filepath.Join(t.TempDir(), "artifacts"), Display: ":99", Width: 800, Height: 600}
+	if len(ffmpeg) > 0 {
+		recordingConfig.FFmpeg = ffmpeg[0]
 	}
-	recorder, err := recording.NewManager(recording.Config{Root: filepath.Join(t.TempDir(), "artifacts"), Display: ":99", Width: 800, Height: 600})
+	recorder, err := recording.NewManager(recordingConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := New(context.Background(), Config{Token: "test-secret", Profile: "nvda-web-2026.1.1", Locale: "en-US", KeyboardLayout: "desktop", ActionTimeout: time.Second, QuietWindow: time.Millisecond}, screenreader, store, engineInjector{screenreader}, recorder, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	screenreader := engine.New(access, store, presenter, braille.Passthrough{}, driver, recorder, logger, engine.Config{Locale: "en-US", KeyboardLayout: "desktop"})
+	if err := screenreader.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(ctx, Config{Token: "test-secret", Profile: "nvda-web-2026.1.1", Locale: "en-US", KeyboardLayout: "desktop", ActionTimeout: time.Second, QuietWindow: time.Millisecond}, screenreader, store, engineInjector{screenreader}, recorder, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,5 +676,481 @@ func TestRejectsSecondSession(t *testing.T) {
 	second := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "two"}, "test-secret")
 	if first.Code != http.StatusCreated || second.Code != http.StatusConflict {
 		t.Fatalf("statuses = %d, %d", first.Code, second.Code)
+	}
+}
+
+func TestSessionEventsStartsAtSessionBoundary(t *testing.T) {
+	for _, query := range []string{"", "?after=0", "?timeoutMs=20"} {
+		t.Run(query, func(t *testing.T) {
+			server := testServer(t)
+			server.store.Append(events.Event{Kind: events.KindSpeech, Text: "outside this test"})
+			created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "scoped-events"}, "test-secret")
+			var session Session
+			if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+				t.Fatal(err)
+			}
+			server.store.Append(events.Event{Kind: events.KindSpeech, SessionID: session.ID, Text: "inside this test"})
+			response := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/events"+query, nil, "test-secret")
+			var result EventsResult
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != http.StatusOK || len(result.Events) != 1 || result.Events[0].Text != "inside this test" {
+				t.Fatalf("events leaked pre-session history: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestSessionEventsDoesNotRequireExpiredPreSessionHistory(t *testing.T) {
+	server := testServer(t)
+	for index := 0; index < 1001; index++ {
+		server.store.Append(events.Event{Kind: events.KindSpeech, Text: "earlier history"})
+	}
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "fresh-events"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	response := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/events", nil, "test-secret")
+	if response.Code != http.StatusOK {
+		t.Fatalf("new session depended on expired history: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestFinishWithoutOutputOnlyWaitsForQuietWindow(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "empty"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	response := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if response.Code != http.StatusOK {
+		t.Fatalf("finish status=%d body=%s", response.Code, response.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed > server.cfg.ActionTimeout/2 {
+		t.Fatalf("empty finish waited %s for an action deadline despite quiet window %s", elapsed, server.cfg.QuietWindow)
+	}
+}
+
+func TestFinishCanRetryRecorderFailureWithoutChangingExports(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "retry-recording"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	server.store.Append(events.Event{Kind: events.KindSpeech, SessionID: session.ID, Text: "before finish"})
+	marker, err := server.recorder.WriteJSON(session.ID, "screenreader-events", []byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wavPath := filepath.Join(filepath.Dir(marker.Path), "screenreader.wav")
+	if err := os.Mkdir(wavPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failed := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if failed.Code != http.StatusInternalServerError || !bytes.Contains(failed.Body.Bytes(), []byte(`"code":"recording_finish"`)) {
+		t.Fatalf("failed finish status=%d body=%s", failed.Code, failed.Body.String())
+	}
+	blocked := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "must-wait"}, "test-secret")
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("failed finish released exclusive session: status=%d body=%s", blocked.Code, blocked.Body.String())
+	}
+	for _, probe := range []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodPost, "/actions", ActionRequest{Command: "nextHeading"}},
+		{http.MethodPost, "/settings", server.engine.PresentationSettings()},
+		{http.MethodPost, "/settings/reset", struct{}{}},
+		{http.MethodGet, "/state", nil},
+		{http.MethodGet, "/document", nil},
+		{http.MethodGet, "/settings", nil},
+		{http.MethodGet, "/events", nil},
+	} {
+		response := request(t, server, probe.method, "/v2/sessions/"+session.ID+probe.path, probe.body, "test-secret")
+		if response.Code != http.StatusConflict || !bytes.Contains(response.Body.Bytes(), []byte(`"code":"session_finishing"`)) {
+			t.Fatalf("%s accepted finalized session: status=%d body=%s", probe.path, response.Code, response.Body.String())
+		}
+	}
+	if err := os.Remove(wavPath); err != nil {
+		t.Fatal(err)
+	}
+	exportCursor := server.store.Cursor()
+	server.store.Append(events.Event{Kind: events.KindSpeech, SessionID: session.ID, Text: "after frozen export"})
+	retried := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if retried.Code != http.StatusOK {
+		t.Fatalf("finish retry status=%d body=%s", retried.Code, retried.Body.String())
+	}
+	var result FinishResult
+	if err := json.Unmarshal(retried.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Cursor != exportCursor {
+		t.Fatalf("retry changed exported cursor: got=%d want=%d", result.Cursor, exportCursor)
+	}
+	artifact := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/artifacts/screenreader-events", nil, "test-secret")
+	if artifact.Code != http.StatusOK || bytes.Contains(artifact.Body.Bytes(), []byte("after frozen export")) {
+		t.Fatalf("retry changed frozen event export: status=%d body=%s", artifact.Code, artifact.Body.String())
+	}
+}
+
+type gatedSynth struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s gatedSynth) Name() string                   { return "gated-test-synth" }
+func (s gatedSynth) Version(context.Context) string { return "test" }
+
+func (s gatedSynth) Synthesize(ctx context.Context, _ synth.Request) (synth.Audio, error) {
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+		return synth.Audio{SampleRate: 22_050, Channels: 1, BitsPerSample: 16, PCM: []byte{1, 0, 2, 0}}, nil
+	case <-ctx.Done():
+		return synth.Audio{}, ctx.Err()
+	}
+}
+
+func TestFinishDrainsNativeSpeechScheduledDuringQuietWindow(t *testing.T) {
+	driver := gatedSynth{started: make(chan struct{}, 1), release: make(chan struct{})}
+	defer close(driver.release)
+	server, access := testServerWithSynth(t, driver)
+	server.cfg.QuietWindow = 100 * time.Millisecond
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "late-native-speech"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	server.mu.RLock()
+	active := server.active[session.ID]
+	server.mu.RUnlock()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	}()
+	<-active.ctx.Done()
+	// Allow the initial, empty synthesis check to finish, then deliver real
+	// native focus output while finalization is still observing its quiet window.
+	time.Sleep(20 * time.Millisecond)
+	access.events <- engine.NativeEvent{Name: "org.a11y.atspi.Event.Focus.Focus", Source: access.graph.Root}
+	select {
+	case <-driver.started:
+	case <-time.After(time.Second):
+		t.Fatal("native focus did not schedule synthesis")
+	}
+	select {
+	case response := <-done:
+		t.Fatalf("finish exported while native utterance PCM was still pending: status=%d body=%s", response.Code, response.Body.String())
+	case <-time.After(2 * server.cfg.QuietWindow):
+	}
+	driver.release <- struct{}{}
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("finish did not complete after pending synthesis drained")
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("finish status=%d body=%s", response.Code, response.Body.String())
+	}
+	artifact := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/artifacts/screenreader-events", nil, "test-secret")
+	var exported EventsResult
+	if err := json.Unmarshal(artifact.Body.Bytes(), &exported); err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.AudioTimeline) != 1 || exported.AudioTimeline[0].SampleCount != 2 {
+		t.Fatalf("native utterance missing from sample index: %#v", exported.AudioTimeline)
+	}
+	indexed := exported.AudioTimeline[0]
+	var speech, audio bool
+	for _, event := range exported.Events {
+		speech = speech || event.Kind == events.KindSpeech && event.MonotonicNS == indexed.MonotonicNS
+		audio = audio || event.Kind == events.KindAudio && event.AudioOffsetNS == indexed.MonotonicNS
+	}
+	if !speech || !audio {
+		t.Fatalf("export omitted native speech or its completed audio: %#v", exported.Events)
+	}
+	wav := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/artifacts/screenreader-audio", nil, "test-secret")
+	decoded, err := synth.DecodeWAV(wav.Body.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := indexed.StartSample * 2
+	if start < 0 || start+4 > int64(len(decoded.PCM)) || !bytes.Equal(decoded.PCM[start:start+4], []byte{1, 0, 2, 0}) {
+		t.Fatalf("indexed native PCM does not match actual WAV: index=%#v PCM bytes=%d", indexed, len(decoded.PCM))
+	}
+}
+
+func TestFinishRejectsCanceledQuietWaitAndReleasesSession(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "canceled-export"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := httptest.NewRequest(http.MethodPost, "/v2/sessions/"+session.ID+"/finish", strings.NewReader("{}")).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer test-secret")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusGatewayTimeout || !bytes.Contains(w.Body.Bytes(), []byte(`"code":"event_export"`)) {
+		t.Fatalf("canceled finish claimed success: status=%d body=%s", w.Code, w.Body.String())
+	}
+	next := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "after-canceled-export"}, "test-secret")
+	if next.Code != http.StatusCreated {
+		t.Fatalf("canceled export retained its session: status=%d body=%s", next.Code, next.Body.String())
+	}
+}
+
+func TestSealedSessionDoesNotPublishLaterPhysicalCommandEvents(t *testing.T) {
+	server := testServer(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "sealed-physical-input"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.engine.SealSessionOutputs(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := server.store.Cursor()
+	if _, err := server.engine.HandlePhysicalGesture(context.Background(), "h"); err == nil {
+		t.Fatal("sealed session accepted a later physical command")
+	}
+	items, _, err := server.store.Snapshot(before, session.ID)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("sealed session still acquired physical command evidence: %#v err=%v", items, err)
+	}
+}
+
+func TestFinishWaitsForNativeCommandAlreadyInProgress(t *testing.T) {
+	server, access := testServerWithAccess(t)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "inflight-native-command"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	access.action = func(ctx context.Context, _ model.ObjectID) error {
+		close(started)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	commandDone := make(chan error, 1)
+	go func() {
+		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter")
+		commandDone <- err
+	}()
+	<-started
+	finished := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		finished <- request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	}()
+	select {
+	case response := <-finished:
+		t.Fatalf("finish exported an incomplete native command: status=%d body=%s", response.Code, response.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	release <- struct{}{}
+	if err := <-commandDone; err != nil {
+		t.Fatal(err)
+	}
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("finish did not complete after the native command settled")
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("finish status=%d body=%s", response.Code, response.Body.String())
+	}
+	artifact := request(t, server, http.MethodGet, "/v2/sessions/"+session.ID+"/artifacts/screenreader-events", nil, "test-secret")
+	if !bytes.Contains(artifact.Body.Bytes(), []byte(`"kind": "commandSettled"`)) {
+		t.Fatalf("finalized event evidence lacks native command settlement: %s", artifact.Body.String())
+	}
+}
+
+func TestFinishNativeCommandDeadlinePreservesRetry(t *testing.T) {
+	server, access := testServerWithAccess(t)
+	server.cfg.ActionTimeout = 20 * time.Millisecond
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "native-seal-timeout"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	access.action = func(ctx context.Context, _ model.ObjectID) error {
+		close(started)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	commandDone := make(chan error, 1)
+	go func() {
+		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter")
+		commandDone <- err
+	}()
+	<-started
+	finished := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		finished <- request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	}()
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-finished:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("native seal timeout blocked in cleanup")
+	}
+	if response.Code != http.StatusGatewayTimeout || !bytes.Contains(response.Body.Bytes(), []byte(`"code":"session_seal"`)) {
+		t.Fatalf("seal deadline status=%d body=%s", response.Code, response.Body.String())
+	}
+	next := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "must-not-overlap-native"}, "test-secret")
+	if next.Code != http.StatusConflict {
+		t.Fatalf("seal timeout released exclusive session: status=%d body=%s", next.Code, next.Body.String())
+	}
+	release <- struct{}{}
+	if err := <-commandDone; err != nil {
+		t.Fatal(err)
+	}
+	retry := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("seal retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+}
+
+func TestAbandonmentDeadlineDoesNotOverlapUnfinishedNativeCommand(t *testing.T) {
+	server, access := testServerWithAccess(t)
+	server.cfg.FinishTimeout = 20 * time.Millisecond
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "bounded-abandonment"}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	access.action = func(ctx context.Context, _ model.ObjectID) error {
+		close(started)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	commandDone := make(chan error, 1)
+	go func() {
+		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter")
+		commandDone <- err
+	}()
+	<-started
+	for index := 0; index < 1001; index++ {
+		server.store.Append(events.Event{Kind: events.KindSpeech, SessionID: session.ID, Text: "overflow"})
+	}
+	finished := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		finished <- request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	}()
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-finished:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("abandonment waited indefinitely on an unfinished native command")
+	}
+	if response.Code != http.StatusInternalServerError || !bytes.Contains(response.Body.Bytes(), []byte(`"code":"event_export"`)) {
+		t.Fatalf("truncated export status=%d body=%s", response.Code, response.Body.String())
+	}
+	next := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "must-not-overlap-abandonment"}, "test-secret")
+	if next.Code != http.StatusConflict {
+		t.Fatalf("abandonment released exclusivity during native action: status=%d body=%s", next.Code, next.Body.String())
+	}
+	release <- struct{}{}
+	if err := <-commandDone; err != nil {
+		t.Fatal(err)
+	}
+	request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	next = request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "after-abandonment"}, "test-secret")
+	if next.Code != http.StatusCreated {
+		t.Fatalf("completed abandonment retained exclusivity: status=%d body=%s", next.Code, next.Body.String())
+	}
+}
+
+func TestPermanentCaptureFailureReleasesSession(t *testing.T) {
+	ffmpeg := filepath.Join(t.TempDir(), "failed-capture")
+	if err := os.WriteFile(ffmpeg, []byte("#!/bin/sh\nexit 7\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server, _ := testServerWithSynth(t, synth.Silence{SampleRate: 22_050}, ffmpeg)
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "permanent-capture", Recording: true}, "test-secret")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := server.recorder.WriteJSON(session.ID, "screenreader-events", []byte("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if finished.Code != http.StatusInternalServerError || !bytes.Contains(finished.Body.Bytes(), []byte(`"code":"recording_finish"`)) {
+		t.Fatalf("capture failure status=%d body=%s", finished.Code, finished.Body.String())
+	}
+	if _, err := os.Stat(filepath.Dir(marker.Path)); !os.IsNotExist(err) {
+		t.Fatalf("irrecoverable capture artifacts retained: %v", err)
+	}
+	next := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "after-permanent-capture"}, "test-secret")
+	if next.Code != http.StatusCreated {
+		t.Fatalf("permanent capture left exclusive session stuck: status=%d body=%s", next.Code, next.Body.String())
+	}
+}
+
+func TestCaptureTimeoutCleanupCanCompleteOnRetry(t *testing.T) {
+	ffmpeg := filepath.Join(t.TempDir(), "stuck-capture")
+	if err := os.WriteFile(ffmpeg, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server, _ := testServerWithSynth(t, synth.Silence{SampleRate: 22_050}, ffmpeg)
+	server.cfg.FinishTimeout = 20 * time.Millisecond
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "killed-capture", Recording: true}, "test-secret")
+	var session Session
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	finished := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+	if finished.Code != http.StatusInternalServerError || !bytes.Contains(finished.Body.Bytes(), []byte(`"code":"recording_finish"`)) {
+		t.Fatalf("killed capture status=%d body=%s", finished.Code, finished.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("capture timeout consumed an extra unbounded cleanup stage: %s", elapsed)
+	}
+	next := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "after-killed-capture"}, "test-secret")
+	if next.Code == http.StatusConflict {
+		// The expired finish context may defer ending the engine session. The
+		// recorder's cached permanent error lets a retry finish that cleanup.
+		retry := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/finish", struct{}{}, "test-secret")
+		if retry.Code != http.StatusInternalServerError || !bytes.Contains(retry.Body.Bytes(), []byte(`"code":"recording_finish"`)) {
+			t.Fatalf("permanent capture cleanup retry status=%d body=%s", retry.Code, retry.Body.String())
+		}
+		next = request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "after-killed-capture-retry"}, "test-secret")
+	}
+	if next.Code != http.StatusCreated {
+		t.Fatalf("timeout-killed capture retained exclusivity after cleanup: status=%d body=%s", next.Code, next.Body.String())
 	}
 }

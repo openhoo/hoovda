@@ -273,7 +273,15 @@ func CommandByGesture(gesture, layout string) (Command, bool) {
 }
 
 func NormalizeGesture(gesture string) string {
-	parts := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(gesture)), func(r rune) bool { return r == '+' || r == '-' })
+	gesture = strings.ToLower(strings.TrimSpace(gesture))
+	if gesture == "-" {
+		return gesture
+	}
+	minusKey := strings.HasSuffix(gesture, "+-") || strings.HasSuffix(gesture, "--")
+	parts := strings.FieldsFunc(gesture, func(r rune) bool { return r == '+' || r == '-' })
+	if minusKey {
+		parts = append(parts, "-")
+	}
 	for index, part := range parts {
 		switch part {
 		case "control":

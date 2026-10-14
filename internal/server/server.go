@@ -41,7 +41,12 @@ type Config struct {
 
 type activeSession struct {
 	Session
-	mu sync.Mutex
+	mu             sync.Mutex
+	ctx            context.Context
+	cancel         context.CancelFunc
+	finishing      bool
+	exportPrepared bool
+	exportCursor   uint64
 }
 
 type finishedSession struct {
@@ -157,16 +162,19 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "recording_start", err)
 		return
 	}
+	sessionCtx, cancelSession := context.WithCancel(s.ctx)
 	s.mu.Lock()
-	s.active[id] = &activeSession{Session: created}
+	s.active[id] = &activeSession{Session: created, ctx: sessionCtx, cancel: cancelSession}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, created)
 }
 
 func (s *Server) state(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.lookupActive(w, r.PathValue("session")); !ok {
+	session, ok := s.lockActive(w, r.PathValue("session"))
+	if !ok {
 		return
 	}
+	defer session.mu.Unlock()
 	result, err := s.stateResult(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "state_refresh", err)
@@ -253,21 +261,19 @@ func nodeAtPoint(nodes []model.Node, x, y int) *model.Node {
 }
 
 func (s *Server) presentationSettings(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.lookupActive(w, r.PathValue("session"))
+	session, ok := s.lockActive(w, r.PathValue("session"))
 	if !ok {
 		return
 	}
-	session.mu.Lock()
 	defer session.mu.Unlock()
 	writeJSON(w, http.StatusOK, s.engine.PresentationSettings())
 }
 
 func (s *Server) setPresentationSettings(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.lookupActive(w, r.PathValue("session"))
+	session, ok := s.lockActive(w, r.PathValue("session"))
 	if !ok {
 		return
 	}
-	session.mu.Lock()
 	defer session.mu.Unlock()
 	var settings profile.PresentationSettings
 	if err := decodeJSON(r, &settings); err != nil {
@@ -282,11 +288,10 @@ func (s *Server) setPresentationSettings(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) resetPresentationSettings(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.lookupActive(w, r.PathValue("session"))
+	session, ok := s.lockActive(w, r.PathValue("session"))
 	if !ok {
 		return
 	}
-	session.mu.Lock()
 	defer session.mu.Unlock()
 	var request struct{}
 	if err := decodeJSON(r, &request); err != nil {
@@ -302,11 +307,10 @@ func (s *Server) resetPresentationSettings(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) action(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.lookupActive(w, r.PathValue("session"))
+	session, ok := s.lockActive(w, r.PathValue("session"))
 	if !ok {
 		return
 	}
-	session.mu.Lock()
 	defer session.mu.Unlock()
 	var request ActionRequest
 	if err := decodeJSON(r, &request); err != nil {
@@ -487,15 +491,22 @@ func commandNeedsNativeFocus(commandID string, observed []events.Event) bool {
 }
 
 func (s *Server) sessionEvents(w http.ResponseWriter, r *http.Request) {
-	session, ok := s.lookupActive(w, r.PathValue("session"))
+	session, ok := s.lockActive(w, r.PathValue("session"))
 	if !ok {
 		return
 	}
-	after, err := parseUintQuery(r, "after", 0)
+	// Event polling must release the action lock so new actions can produce
+	// the events it awaits. Session finalization cancels the wait separately.
+	session.mu.Unlock()
+	after, err := parseUintQuery(r, "after", session.StartSequence)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_after", err)
 		return
 	}
+	// Cursors are process-global, while this endpoint is session-scoped.
+	// Earlier cursors must not expose ambient events from previous tests or
+	// make a new session depend on history that already expired.
+	after = max(after, session.StartSequence)
 	timeoutMS, err := parseUintQuery(r, "timeoutMs", 0)
 	if err != nil || timeoutMS > 60_000 {
 		writeError(w, http.StatusBadRequest, "invalid_timeout", errors.New("timeoutMs must be between 0 and 60000"))
@@ -503,6 +514,10 @@ func (s *Server) sessionEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if timeoutMS == 0 {
 		resultEvents, cursor, snapshotErr := s.store.Snapshot(after, session.ID)
+		if session.ctx.Err() != nil {
+			writeError(w, http.StatusConflict, "session_finishing", errors.New("session is finishing"))
+			return
+		}
 		if snapshotErr != nil {
 			writeError(w, http.StatusBadRequest, "event_cursor", snapshotErr)
 			return
@@ -512,7 +527,13 @@ func (s *Server) sessionEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
+	stopSessionCancel := context.AfterFunc(session.ctx, cancel)
+	defer stopSessionCancel()
 	resultEvents, cursor, timedOut, waitErr := s.store.Wait(ctx, after, session.ID, s.cfg.QuietWindow)
+	if session.ctx.Err() != nil {
+		writeError(w, http.StatusConflict, "session_finishing", errors.New("session is finishing"))
+		return
+	}
 	if waitErr != nil {
 		writeError(w, http.StatusBadRequest, "event_cursor", waitErr)
 		return
@@ -521,9 +542,11 @@ func (s *Server) sessionEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) document(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.lookupActive(w, r.PathValue("session")); !ok {
+	session, ok := s.lockActive(w, r.PathValue("session"))
+	if !ok {
 		return
 	}
+	defer session.mu.Unlock()
 	if err := s.engine.Sync(r.Context()); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "document_refresh", err)
 		return
@@ -563,72 +586,125 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	synthesisCtx, cancelSynthesis := context.WithTimeout(r.Context(), s.cfg.FinishTimeout)
-	if err := s.engine.WaitForSynthesis(synthesisCtx); err != nil {
+	session.finishing = true
+	session.cancel()
+	if !session.exportPrepared {
+		exportCtx, cancelExport := context.WithTimeout(r.Context(), s.cfg.ActionTimeout)
+		_, _, _, err := s.store.Settle(exportCtx, session.StartSequence, session.ID, s.cfg.QuietWindow)
+		if err != nil {
+			cancelExport()
+			s.abandonSession(session)
+			status := http.StatusInternalServerError
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				status = http.StatusGatewayTimeout
+			}
+			writeError(w, status, "event_export", err)
+			return
+		}
+		sealErr := s.engine.SealSessionOutputsContext(exportCtx, session.ID)
+		cancelExport()
+		if sealErr != nil {
+			// An unsolicited native command may still be in progress. Preserve
+			// the exclusive session for retry without waiting on unbounded cleanup
+			// or permitting a new test to overlap the unfinished input.
+			status := http.StatusInternalServerError
+			if errors.Is(sealErr, context.DeadlineExceeded) || errors.Is(sealErr, context.Canceled) {
+				status = http.StatusGatewayTimeout
+			}
+			writeError(w, status, "session_seal", sealErr)
+			return
+		}
+		synthesisCtx, cancelSynthesis := context.WithTimeout(r.Context(), s.cfg.FinishTimeout)
+		if err := s.engine.WaitForSynthesis(synthesisCtx); err != nil {
+			cancelSynthesis()
+			s.abandonSession(session)
+			writeError(w, http.StatusGatewayTimeout, "speech_synthesis", err)
+			return
+		}
 		cancelSynthesis()
-		s.abandonSession(session)
-		writeError(w, http.StatusGatewayTimeout, "speech_synthesis", err)
-		return
-	}
-	cancelSynthesis()
 
-	exportCtx, cancelExport := context.WithTimeout(r.Context(), s.cfg.ActionTimeout)
-	allEvents, cursor, _, err := s.store.Wait(exportCtx, session.StartSequence, session.ID, s.cfg.QuietWindow)
-	cancelExport()
-	if err != nil {
-		s.abandonSession(session)
-		writeError(w, http.StatusInternalServerError, "event_export", err)
-		return
+		allEvents, cursor, err := s.store.Snapshot(session.StartSequence, session.ID)
+		if err != nil {
+			s.abandonSession(session)
+			writeError(w, http.StatusInternalServerError, "event_export", err)
+			return
+		}
+		settings := s.engine.PresentationSettings()
+		audioTimeline, timelineErr := s.recorder.SealAudioTimeline(session.ID)
+		if timelineErr != nil {
+			s.abandonSession(session)
+			writeError(w, http.StatusInternalServerError, "audio_timeline", timelineErr)
+			return
+		}
+		eventJSON, err := json.MarshalIndent(EventsResult{Cursor: cursor, Events: allEvents, AudioTimeline: audioTimeline, PresentationSettings: &settings}, "", "  ")
+		if err == nil {
+			_, err = s.recorder.WriteJSON(session.ID, "screenreader-events", append(eventJSON, '\n'))
+		}
+		if err != nil {
+			s.abandonSession(session)
+			writeError(w, http.StatusInternalServerError, "event_export", err)
+			return
+		}
+		refreshCtx, cancelRefresh := context.WithTimeout(r.Context(), s.cfg.ActionTimeout)
+		refreshErr := s.engine.Sync(refreshCtx)
+		cancelRefresh()
+		if refreshErr != nil {
+			// The page or browser context may already be closed during fixture
+			// cleanup. Its optional final graph must not discard completed
+			// events and recordings, or export the stale cached document.
+			s.logger.Warn("skip unavailable final document", "session", session.ID, "error", refreshErr)
+		} else {
+			state := s.engine.State()
+			documentJSON, err := json.MarshalIndent(DocumentResult{Profile: s.cfg.Profile, Locale: s.cfg.Locale, Revision: state.GraphRevision, Nodes: s.engine.DocumentSnapshot()}, "", "  ")
+			if err == nil {
+				_, err = s.recorder.WriteJSON(session.ID, "screenreader-document", append(documentJSON, '\n'))
+			}
+			if err != nil {
+				s.abandonSession(session)
+				writeError(w, http.StatusInternalServerError, "document_export", err)
+				return
+			}
+		}
+		session.exportCursor = cursor
+		session.exportPrepared = true
 	}
-	settings := s.engine.PresentationSettings()
-	eventJSON, err := json.MarshalIndent(EventsResult{Cursor: cursor, Events: allEvents, PresentationSettings: &settings}, "", "  ")
-	if err == nil {
-		_, err = s.recorder.WriteJSON(session.ID, "screenreader-events", append(eventJSON, '\n'))
-	}
-	if err != nil {
-		s.abandonSession(session)
-		writeError(w, http.StatusInternalServerError, "event_export", err)
-		return
-	}
-	refreshCtx, cancelRefresh := context.WithTimeout(r.Context(), s.cfg.ActionTimeout)
-	refreshErr := s.engine.Sync(refreshCtx)
-	cancelRefresh()
-	if refreshErr != nil {
-		s.abandonSession(session)
-		writeError(w, http.StatusServiceUnavailable, "document_refresh", refreshErr)
-		return
-	}
-	state := s.engine.State()
-	documentJSON, err := json.MarshalIndent(DocumentResult{Profile: s.cfg.Profile, Locale: s.cfg.Locale, Revision: state.GraphRevision, Nodes: s.engine.DocumentSnapshot()}, "", "  ")
-	if err == nil {
-		_, err = s.recorder.WriteJSON(session.ID, "screenreader-document", append(documentJSON, '\n'))
-	}
-	if err != nil {
-		s.abandonSession(session)
-		writeError(w, http.StatusInternalServerError, "document_export", err)
+	if err := r.Context().Err(); err != nil {
+		// A canceled final document refresh can leave fully prepared evidence.
+		// Preserve it and exclusivity for retry without claiming completion.
+		writeError(w, http.StatusGatewayTimeout, "recording_finish", err)
 		return
 	}
 	finishCtx, cancelFinish := context.WithTimeout(r.Context(), s.cfg.FinishTimeout)
 	artifacts, finishErr := s.recorder.Finish(finishCtx, session.ID)
+	if finishErr != nil {
+		if errors.Is(finishErr, recording.ErrCaptureFailed) {
+			// The capture process has already stopped with a permanent error.
+			// Its cached failure cannot recover through artifact-export retries.
+			s.abandonSessionContext(finishCtx, session)
+		}
+		cancelFinish()
+		// Recoverable export failures keep prepared evidence and exclusivity
+		// so retries do not rerun user actions or change the exported cursor.
+		writeError(w, http.StatusInternalServerError, "recording_finish", finishErr)
+		return
+	}
 	cancelFinish()
 	s.engine.EndSession(session.ID)
-	result := FinishResult{SessionID: session.ID, Cursor: cursor, Artifacts: artifacts}
+	result := FinishResult{SessionID: session.ID, Cursor: session.exportCursor, Artifacts: artifacts}
 	var expired []string
 	s.mu.Lock()
 	delete(s.active, session.ID)
-	if finishErr == nil {
-		items := make(map[string]recording.Artifact, len(artifacts))
-		for _, artifact := range artifacts {
-			items[artifact.Name] = artifact
-		}
-		s.finished[session.ID] = &finishedSession{result: result, artifacts: items}
-		s.finishedOrder = append(s.finishedOrder, session.ID)
-		for len(s.finishedOrder) > s.cfg.FinishedSessionLimit {
-			oldest := s.finishedOrder[0]
-			s.finishedOrder = s.finishedOrder[1:]
-			delete(s.finished, oldest)
-			expired = append(expired, oldest)
-		}
+	items := make(map[string]recording.Artifact, len(artifacts))
+	for _, artifact := range artifacts {
+		items[artifact.Name] = artifact
+	}
+	s.finished[session.ID] = &finishedSession{result: result, artifacts: items}
+	s.finishedOrder = append(s.finishedOrder, session.ID)
+	for len(s.finishedOrder) > s.cfg.FinishedSessionLimit {
+		oldest := s.finishedOrder[0]
+		s.finishedOrder = s.finishedOrder[1:]
+		delete(s.finished, oldest)
+		expired = append(expired, oldest)
 	}
 	s.mu.Unlock()
 	<-s.sem
@@ -637,21 +713,24 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("remove expired artifacts", "session", expiredID, "error", removeErr)
 		}
 	}
-	if finishErr != nil {
-		if removeErr := s.recorder.RemoveArtifacts(session.ID); removeErr != nil {
-			s.logger.Warn("remove failed session artifacts", "session", session.ID, "error", removeErr)
-		}
-		writeError(w, http.StatusInternalServerError, "recording_finish", finishErr)
-		return
-	}
 	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) abandonSession(session *activeSession) {
-	s.engine.EndSession(session.ID)
 	finishCtx, cancel := context.WithTimeout(context.Background(), s.cfg.FinishTimeout)
-	_, finishErr := s.recorder.Finish(finishCtx, session.ID)
-	cancel()
+	defer cancel()
+	s.abandonSessionContext(finishCtx, session)
+}
+
+func (s *Server) abandonSessionContext(ctx context.Context, session *activeSession) {
+	session.cancel()
+	if err := s.engine.EndSessionContext(ctx, session.ID); err != nil {
+		// Keep exclusivity while an unfinished native command can still change
+		// runtime state. A later finish retry can complete the abandonment.
+		s.logger.Warn("end abandoned session", "session", session.ID, "error", err)
+		return
+	}
+	finishErr := s.recorder.Abort(ctx, session.ID)
 	if finishErr != nil {
 		s.logger.Warn("finalize abandoned recording", "session", session.ID, "error", finishErr)
 	}
@@ -714,6 +793,30 @@ func (s *Server) lookupActive(w http.ResponseWriter, id string) (*activeSession,
 	s.mu.RUnlock()
 	if session == nil {
 		writeError(w, http.StatusNotFound, "session_not_found", errors.New("active session not found"))
+		return nil, false
+	}
+	return session, true
+}
+
+// lockActive rechecks membership after taking the per-session lock. A request
+// may have found its session before a concurrent finish removed it.
+func (s *Server) lockActive(w http.ResponseWriter, id string) (*activeSession, bool) {
+	session, ok := s.lookupActive(w, id)
+	if !ok {
+		return nil, false
+	}
+	session.mu.Lock()
+	s.mu.RLock()
+	active := s.active[id] == session
+	s.mu.RUnlock()
+	if !active {
+		session.mu.Unlock()
+		writeError(w, http.StatusNotFound, "session_not_found", errors.New("active session not found"))
+		return nil, false
+	}
+	if session.finishing {
+		session.mu.Unlock()
+		writeError(w, http.StatusConflict, "session_finishing", errors.New("session is finishing"))
 		return nil, false
 	}
 	return session, true

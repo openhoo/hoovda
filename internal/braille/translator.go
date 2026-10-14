@@ -1,13 +1,14 @@
 package braille
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/openhoo/hoovda/internal/processoutput"
 )
 
 const MaxInputBytes = 1 << 20
@@ -51,11 +52,14 @@ func (l Liblouis) Translate(ctx context.Context, text, locale string, cursor int
 	if err != nil {
 		return Result{}, err
 	}
-	command := exec.CommandContext(ctx, l.command(), table)
+	// Translation tables default to an ASCII braille display encoding. Request
+	// Unicode braille explicitly so each returned rune carries its dot pattern.
+	command := exec.CommandContext(ctx, l.command(), "unicode.dis,"+table)
 	command.Stdin = strings.NewReader(text + "\n")
-	var stdout, stderr bytes.Buffer
+	stdout := processoutput.Buffer{Limit: 32 << 20}
+	stderr := processoutput.Buffer{Limit: 64 << 10}
 	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Run(); err != nil {
+	if err := errors.Join(command.Run(), ctx.Err(), stdout.Err, stderr.Err); err != nil {
 		return Result{}, fmt.Errorf("liblouis translation failed: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	translated := strings.TrimSuffix(stdout.String(), "\n")

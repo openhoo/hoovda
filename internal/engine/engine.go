@@ -77,6 +77,31 @@ type State struct {
 	LastSequence           uint64           `json:"lastSequence"`
 }
 
+// outputMutex serializes emission and synthesis registration while allowing
+// session finalization to stop waiting when its shared deadline expires.
+type outputMutex struct {
+	gate chan struct{}
+}
+
+func (m outputMutex) Lock()   { m.gate <- struct{}{} }
+func (m outputMutex) Unlock() { <-m.gate }
+
+func (m outputMutex) LockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case m.gate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			m.Unlock()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 type Engine struct {
 	access    Accessibility
 	store     *events.Store
@@ -88,6 +113,8 @@ type Engine struct {
 	cfg       Config
 
 	mu                      sync.RWMutex
+	commandGate             chan struct{}
+	outputMu                outputMutex
 	refreshMu               sync.Mutex
 	graph                   *model.Graph
 	graphDirty              bool
@@ -114,6 +141,8 @@ type Engine struct {
 	brailleOffset           int
 	brailleTether           string
 	activeSession           string
+	sessionGeneration       uint64
+	outputsSealed           bool
 	presentationBaseline    profile.PresentationSettings
 	presentationBaselineSet bool
 	activeAction            string
@@ -123,6 +152,7 @@ type Engine struct {
 	findQuery               string
 	synthCancel             context.CancelFunc
 	synthDone               <-chan struct{}
+	synthPending            map[chan struct{}]struct{}
 }
 
 type liveRegionAnnouncement struct {
@@ -142,7 +172,9 @@ func New(access Accessibility, store *events.Store, presenter *profile.Presenter
 		cfg.SynthRequest.Volume = 100
 	}
 	return &Engine{
-		access: access, store: store, presenter: presenter, braille: brailleTranslator,
+		commandGate: make(chan struct{}, 1),
+		outputMu:    outputMutex{gate: make(chan struct{}, 1)},
+		access:      access, store: store, presenter: presenter, braille: brailleTranslator,
 		synth: synthDriver, audioSink: sink, logger: logger, cfg: cfg, singleLetter: true,
 		cursor: model.Cursor{Mode: "browse"}, review: model.Cursor{Mode: "object"},
 		speechMode: "talk", brailleTether: "auto",
@@ -209,10 +241,12 @@ func initialCursor(graph *model.Graph) model.ObjectID {
 		return model.ObjectID{}
 	}
 	var document model.ObjectID
+	bestPriority := -1
 	for _, id := range graph.Order {
 		if node := graph.Nodes[id]; node != nil && strings.HasPrefix(node.Role, "document") {
-			if !document.Valid() || node.HasState("focused") || node.HasState("showing") {
+			if priority := documentPriority(node); priority >= bestPriority {
 				document = id
+				bestPriority = priority
 			}
 		}
 	}
@@ -223,6 +257,17 @@ func initialCursor(graph *model.Graph) model.ObjectID {
 		return graph.Order[0]
 	}
 	return graph.Root
+}
+
+func documentPriority(node *model.Node) int {
+	priority := 0
+	if node.HasState("showing") {
+		priority++
+	}
+	if node.HasState("focused") {
+		priority += 2
+	}
+	return priority
 }
 
 func remapCursor(oldGraph, newGraph *model.Graph, oldID model.ObjectID) model.ObjectID {
@@ -260,14 +305,15 @@ func remapCursor(oldGraph, newGraph *model.Graph, oldID model.ObjectID) model.Ob
 
 func matchingDocument(graph *model.Graph, old *model.Node) (model.ObjectID, bool) {
 	var fallback model.ObjectID
+	bestPriority := -1
 	for _, id := range graph.Order {
 		node := graph.Nodes[id]
 		if node == nil || !strings.HasPrefix(node.Role, "document") || node.Name != old.Name {
 			continue
 		}
-		fallback = id
-		if node.HasState("focused") && node.HasState("showing") {
+		if priority := documentPriority(node); priority >= bestPriority {
 			fallback = id
+			bestPriority = priority
 		}
 	}
 	return fallback, fallback.Valid()
@@ -292,6 +338,10 @@ func (e *Engine) BeginSession(id string) error {
 	if id == "" {
 		return errors.New("session id is empty")
 	}
+	e.commandGate <- struct{}{}
+	defer func() { <-e.commandGate }()
+	e.outputMu.Lock()
+	defer e.outputMu.Unlock()
 	baseline := e.presenter.Settings()
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -299,6 +349,8 @@ func (e *Engine) BeginSession(id string) error {
 		return errors.New("another test session is active")
 	}
 	e.activeSession = id
+	e.sessionGeneration++
+	e.outputsSealed = false
 	e.presentationBaseline = baseline
 	e.presentationBaselineSet = true
 	e.recentLiveRegions = make(map[liveRegionAnnouncement]time.Time)
@@ -307,13 +359,31 @@ func (e *Engine) BeginSession(id string) error {
 }
 
 func (e *Engine) EndSession(id string) {
+	_ = e.EndSessionContext(context.Background(), id)
+}
+
+// EndSessionContext lets cleanup wait for native commands within the caller's
+// deadline. A timeout retains the active session for a later safe retry.
+func (e *Engine) EndSessionContext(ctx context.Context, id string) error {
+	select {
+	case e.commandGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-e.commandGate }()
+	if err := e.outputMu.LockContext(ctx); err != nil {
+		return err
+	}
+	defer e.outputMu.Unlock()
 	var baseline profile.PresentationSettings
 	restore := false
 	e.mu.Lock()
 	if e.activeSession == id {
+		e.sessionGeneration++
 		baseline = e.presentationBaseline.Clone()
 		restore = e.presentationBaselineSet
 		e.activeSession = ""
+		e.outputsSealed = false
 		e.activeAction = ""
 		e.presentationBaseline = profile.PresentationSettings{}
 		e.presentationBaselineSet = false
@@ -325,6 +395,39 @@ func (e *Engine) EndSession(id string) {
 	if restore {
 		_ = e.presenter.SetSettings(baseline)
 	}
+	return nil
+}
+
+// SealSessionOutputs freezes session output attribution and synthesis
+// scheduling. Already scheduled audio is still drained by WaitForSynthesis.
+// The session stays active so an interrupted artifact export can be retried.
+func (e *Engine) SealSessionOutputs(id string) error {
+	return e.SealSessionOutputsContext(context.Background(), id)
+}
+
+// SealSessionOutputsContext also waits for an unsolicited physical command
+// already executing, within the export caller's deadline.
+func (e *Engine) SealSessionOutputsContext(ctx context.Context, id string) error {
+	select {
+	case e.commandGate <- struct{}{}:
+		defer func() { <-e.commandGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := e.outputMu.LockContext(ctx); err != nil {
+		return err
+	}
+	defer e.outputMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if id == "" || e.activeSession != id {
+		return errors.New("session is not active")
+	}
+	if e.activeAction != "" {
+		return errors.New("an action is active")
+	}
+	e.outputsSealed = true
+	return nil
 }
 
 func (e *Engine) BeginAction(sessionID, commandID string) error {
@@ -335,6 +438,9 @@ func (e *Engine) BeginAction(sessionID, commandID string) error {
 	defer e.mu.Unlock()
 	if sessionID == "" || e.activeSession != sessionID {
 		return errors.New("session is not active")
+	}
+	if e.outputsSealed {
+		return errors.New("session is finishing")
 	}
 	if e.activeAction != "" {
 		return errors.New("another action is active")
@@ -380,6 +486,8 @@ func (e *Engine) SetPresentationSettings(sessionID string, settings profile.Pres
 	if err := settings.Validate(); err != nil {
 		return err
 	}
+	e.outputMu.Lock()
+	defer e.outputMu.Unlock()
 	e.mu.RLock()
 	active := e.activeSession == sessionID && sessionID != ""
 	e.mu.RUnlock()
@@ -416,21 +524,20 @@ func (e *Engine) ResetPresentationSettings(sessionID string) (profile.Presentati
 func (e *Engine) WaitForSynthesis(ctx context.Context) error {
 	for {
 		e.mu.RLock()
-		done := e.synthDone
+		pending := make([]chan struct{}, 0, len(e.synthPending))
+		for done := range e.synthPending {
+			pending = append(pending, done)
+		}
 		e.mu.RUnlock()
-		if done == nil {
+		if len(pending) == 0 {
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-done:
-		}
-		e.mu.RLock()
-		current := e.synthDone
-		e.mu.RUnlock()
-		if current == done {
-			return nil
+		for _, done := range pending {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-done:
+			}
 		}
 	}
 }
@@ -516,8 +623,9 @@ func (e *Engine) ShouldConsumeGesture(gesture string) bool {
 	}
 	e.mu.RLock()
 	mode, singleLetter := e.cursor.Mode, e.singleLetter
+	sealed := e.outputsSealed
 	e.mu.RUnlock()
-	return commandConsumes(command, mode, singleLetter)
+	return !sealed && commandConsumes(command, mode, singleLetter)
 }
 
 func commandConsumes(command profile.Command, mode string, singleLetter bool) bool {
@@ -557,11 +665,27 @@ func (e *Engine) ExecuteDirectWithArgument(ctx context.Context, commandID, argum
 }
 
 func (e *Engine) execute(ctx context.Context, command profile.Command, argument string, refreshGraph bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	select {
+	case e.commandGate <- struct{}{}:
+		defer func() { <-e.commandGate }()
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	e.mu.RLock()
 	sessionID := e.activeSession
 	mode := e.cursor.Mode
 	singleLetter := e.singleLetter
+	sealed := e.outputsSealed
 	e.mu.RUnlock()
+	if sealed {
+		return false, errors.New("session is finishing")
+	}
 	e.store.Append(events.Event{Kind: events.KindCommandStarted, SessionID: sessionID, CausalCommand: command.ID, Text: command.Label, Provenance: events.ProvenanceAdapterLifecycle})
 	consume := commandConsumes(command, mode, singleLetter)
 	var err error
@@ -1269,7 +1393,7 @@ func (e *Engine) reviewCommand(ctx context.Context, command profile.Command) err
 	if e.review.Offset < 0 {
 		e.review.Offset = 0
 	}
-	if e.review.Offset >= runeCount {
+	if e.review.Offset > runeCount || (e.review.Offset == runeCount && !strings.HasSuffix(text, "\n")) {
 		e.review.Offset = runeCount - 1
 	}
 
@@ -1290,13 +1414,21 @@ func (e *Engine) reviewCommand(ctx context.Context, command profile.Command) err
 	case "reviewPreviousWord", "reviewNextWord":
 		value, presentation, err = moveReviewRange(node.ID, text, e.review.Offset, command.Direction, model.TextUnitWord, e.presenter)
 	case "reviewCurrentCharacter":
-		value, err = model.CharacterRange(node.ID, text, e.review.Offset)
+		if e.review.Offset == runeCount {
+			value = model.TextRange{Object: node.ID, Start: runeCount, End: runeCount}
+		} else {
+			value, err = model.CharacterRange(node.ID, text, e.review.Offset)
+		}
 	case "reviewPreviousCharacter", "reviewNextCharacter":
 		value, presentation, err = moveReviewCharacter(node.ID, text, e.review.Offset, command.Direction, e.presenter)
 	case "reviewLineStart", "reviewLineEnd":
 		line, rangeErr := textRangeAt(node.ID, text, e.review.Offset, model.TextUnitLine)
 		if rangeErr != nil {
 			err = rangeErr
+			break
+		}
+		if line.Start == line.End {
+			value = line
 			break
 		}
 		offset := line.Start
@@ -1350,11 +1482,13 @@ func (e *Engine) reviewCommand(ctx context.Context, command profile.Command) err
 		}
 		end = min(end+1, runeCount)
 		selection := model.TextRange{Object: node.ID, Start: start, End: end}
-		e.reviewSelection, e.reviewSelectionSet = selection, true
 		e.mu.Unlock()
 		if err := e.access.SetTextSelection(ctx, node.ID, start, end); err != nil {
 			return fmt.Errorf("set review selection: %w", err)
 		}
+		e.mu.Lock()
+		e.reviewSelection, e.reviewSelectionSet = selection, true
+		e.mu.Unlock()
 		e.emit(e.presenter.ReviewSelected(end-start), node, command.ID, "reviewSelection", "normal")
 		return nil
 	case "reportReviewFormatting":
@@ -1391,9 +1525,9 @@ func (e *Engine) reviewCommand(ctx context.Context, command profile.Command) err
 		e.mu.Unlock()
 		return err
 	}
-	if value.End > value.Start {
-		e.review.Object, e.review.Offset = node.ID, value.Start
-	}
+	// Empty visual lines still have a position. Keeping the old offset would
+	// make repeated next-line commands return the same blank line forever.
+	e.review.Object, e.review.Offset = node.ID, value.Start
 	e.mu.Unlock()
 	fragment, err := value.Text(text)
 	if err != nil {
@@ -1449,7 +1583,10 @@ func textRangeAt(id model.ObjectID, text string, offset int, unit model.TextUnit
 	if err != nil {
 		return model.TextRange{}, err
 	}
-	for _, value := range ranges {
+	for index, value := range ranges {
+		if unit == model.TextUnitLine && offset >= value.Start && (index+1 == len(ranges) || offset < ranges[index+1].Start) {
+			return value, nil
+		}
 		if offset >= value.Start && (offset < value.End || value.Start == value.End) {
 			return value, nil
 		}
@@ -1480,6 +1617,13 @@ func moveReviewCharacter(id model.ObjectID, text string, offset, direction int, 
 	line, err := textRangeAt(id, text, offset, model.TextUnitLine)
 	if err != nil {
 		return model.TextRange{}, profile.Presentation{}, err
+	}
+	if line.Start == line.End {
+		kind := "right"
+		if direction < 0 {
+			kind = "left"
+		}
+		return line, presenter.ReviewBoundary(kind), nil
 	}
 	target := offset + direction
 	if target < line.Start || target >= line.End {
@@ -2423,23 +2567,33 @@ func (e *Engine) find(commandID, query string, direction int) error {
 	}
 	document, scoped := graph.DocumentRoot(current)
 	start := graph.Index(current)
+	if start < 0 {
+		start = 0
+		if direction < 0 {
+			start = len(graph.Order) - 1
+		}
+	}
 	queryFold := strings.ToLower(query)
 	var match *model.Node
-	for index := start + direction; index >= 0 && index < len(graph.Order); index += direction {
+	for index := start; index >= 0 && index < len(graph.Order); index += direction {
 		node := graph.Nodes[graph.Order[index]]
 		if node == nil || (scoped && !graph.InDocument(node.ID, document)) {
 			continue
 		}
-		haystack := strings.Join([]string{node.SpokenContent(), node.Description}, " ")
-		if !node.IsProtected() {
-			haystack += " " + node.Text
+		offset := -1
+		if direction < 0 {
+			offset = len([]rune(findText(node))) + 1
 		}
-		if strings.Contains(strings.ToLower(haystack), queryFold) {
-			if sameFindOccurrence(graph, current, node, queryFold) {
+		includeCursor := false
+		if node.ID == current {
+			offset, includeCursor = e.cursor.Offset, commandID == "find"
+		}
+		if foundOffset, found := findNodeOffset(node, queryFold, offset, direction, includeCursor); found {
+			if node.ID != current && sameFindOccurrence(graph, current, node, queryFold) {
 				continue
 			}
 			match = node
-			e.cursor.Object, e.cursor.Offset = node.ID, 0
+			e.cursor.Object, e.cursor.Offset = node.ID, foundOffset
 			break
 		}
 	}
@@ -2450,6 +2604,66 @@ func (e *Engine) find(commandID, query string, direction int) error {
 	}
 	e.emit(e.presenter.Present(match, "textNavigation"), match, commandID, "find", "normal")
 	return nil
+}
+
+func findNodeOffset(node *model.Node, queryFold string, offset, direction int, includeOffset bool) (int, bool) {
+	text := findText(node)
+	if found, ok := findTextOffset(text, queryFold, offset, direction, includeOffset); ok {
+		return found, true
+	}
+	// SpokenContent can be the same text with whitespace/embedded markers
+	// normalized. It must not create a second virtual occurrence at offset zero
+	// after all actual text occurrences lie outside the requested direction.
+	if strings.Contains(strings.ToLower(text), queryFold) {
+		return 0, false
+	}
+	// Names and descriptions remain searchable even when the AT-SPI Text
+	// interface contains a different value. They identify the object rather
+	// than a position inside its text, so their virtual offset is zero.
+	allowed := (direction > 0 && offset < 0) || (direction < 0 && offset > 0) || (includeOffset && offset == 0)
+	if allowed && (strings.Contains(strings.ToLower(node.SpokenContent()), queryFold) || strings.Contains(strings.ToLower(node.Description), queryFold)) {
+		return 0, true
+	}
+	return 0, false
+}
+
+func findText(node *model.Node) string {
+	text := navigableText(node)
+	if text == "" {
+		text = node.SpokenContent()
+	}
+	return text
+}
+
+func findTextOffset(text, queryFold string, offset, direction int, includeOffset bool) (int, bool) {
+	// Case conversion can change UTF-8 byte lengths. Both search bounds and the
+	// virtual cursor use rune offsets, so compare rune slices throughout.
+	haystack, needle := []rune(strings.ToLower(text)), []rune(queryFold)
+	if len(needle) == 0 {
+		return 0, false
+	}
+	if direction > 0 {
+		start := offset + 1
+		if includeOffset {
+			start = offset
+		}
+		for index := max(0, start); index+len(needle) <= len(haystack); index++ {
+			if slices.Equal(haystack[index:index+len(needle)], needle) {
+				return index, true
+			}
+		}
+	} else {
+		start := offset - 1
+		if includeOffset {
+			start = offset
+		}
+		for index := min(start, len(haystack)-len(needle)); index >= 0; index-- {
+			if slices.Equal(haystack[index:index+len(needle)], needle) {
+				return index, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func sameFindOccurrence(graph *model.Graph, current model.ObjectID, candidate *model.Node, queryFold string) bool {
@@ -2524,6 +2738,18 @@ func (e *Engine) emit(presentation profile.Presentation, node *model.Node, comma
 }
 
 func (e *Engine) emitEvidence(presentation profile.Presentation, node *model.Node, command, reason, priority string, synthesize bool) events.Event {
+	e.outputMu.Lock()
+	defer e.outputMu.Unlock()
+	return e.emitEvidenceLocked(presentation, node, command, reason, priority, synthesize)
+}
+
+func (e *Engine) emitEvidenceLocked(presentation profile.Presentation, node *model.Node, command, reason, priority string, synthesize bool) events.Event {
+	e.mu.RLock()
+	sealed := e.outputsSealed
+	e.mu.RUnlock()
+	if sealed {
+		return events.Event{}
+	}
 	if presentation.Speech == "" && presentation.Braille == "" {
 		return events.Event{}
 	}
@@ -2544,7 +2770,9 @@ func (e *Engine) emitEvidence(presentation profile.Presentation, node *model.Nod
 		cancel()
 		if err != nil {
 			e.logger.Error("braille translation failed", "error", err)
-			translation = braille.Result{Text: presentation.Braille, Cells: []byte(presentation.Braille)}
+			// Logical text remains useful when the native translator fails, but
+			// character bytes are not physical braille dot patterns.
+			translation = braille.Result{Text: presentation.Braille}
 		}
 		// NVDA's braille spy exposes the logical braille buffer text separately
 		// from the translated cell array written to a display. Keep the same
@@ -2555,13 +2783,23 @@ func (e *Engine) emitEvidence(presentation profile.Presentation, node *model.Nod
 		e.store.Append(events.Event{Kind: events.KindBraille, SessionID: sessionID, CausalCommand: command, Source: source, Text: presentation.Braille, BrailleCells: translation.Cells, BrailleCursor: translation.Cursor, Reason: reason, Provenance: events.ProvenanceScreenReaderOutput, Redacted: redacted})
 	}
 	if synthesize && presentation.Speech != "" {
-		e.startSynthesis(speechEvent, presentation)
+		e.startSynthesisLocked(speechEvent, presentation)
 	}
 	return speechEvent
 }
 
 func (e *Engine) startSynthesis(event events.Event, presentation profile.Presentation) {
+	e.outputMu.Lock()
+	defer e.outputMu.Unlock()
+	e.startSynthesisLocked(event, presentation)
+}
+
+func (e *Engine) startSynthesisLocked(event events.Event, presentation profile.Presentation) {
 	e.mu.Lock()
+	if e.outputsSealed {
+		e.mu.Unlock()
+		return
+	}
 	if e.synthCancel != nil {
 		e.synthCancel()
 	}
@@ -2569,11 +2807,20 @@ func (e *Engine) startSynthesis(event events.Event, presentation profile.Present
 	done := make(chan struct{})
 	e.synthCancel = cancel
 	e.synthDone = done
+	if e.synthPending == nil {
+		e.synthPending = make(map[chan struct{}]struct{})
+	}
+	e.synthPending[done] = struct{}{}
 	e.mu.Unlock()
 	request := e.cfg.SynthRequest
 	request.Text, request.Locale, request.Commands = presentation.Speech, e.cfg.Locale, presentation.SpeechCommands
 	go func() {
-		defer close(done)
+		defer func() {
+			e.mu.Lock()
+			delete(e.synthPending, done)
+			e.mu.Unlock()
+			close(done)
+		}()
 		defer cancel()
 		audio, err := e.synth.Synthesize(ctx, request)
 		if err != nil {
@@ -2598,47 +2845,75 @@ func (e *Engine) eventLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if strings.Contains(native.Name, ".Document.") {
-				e.mu.Lock()
-				e.focus = native.Source
-				e.browserWindowActive = true
-				e.webContentFocused = true
-				e.graphDirty = true
-				e.mu.Unlock()
-			} else if strings.Contains(native.Name, ".Object.") {
-				e.mu.Lock()
-				e.graphDirty = true
-				e.mu.Unlock()
-			}
-			if strings.HasSuffix(native.Name, ".Focus") || (strings.HasSuffix(native.Name, ".StateChanged") && native.Detail == "focused" && native.Detail1 != 0) {
-				if !e.handleFocus(ctx, native.Source) {
-					continue
-				}
-			}
-			if strings.HasSuffix(native.Name, ".StateChanged") {
-				e.handleStateChange(ctx, native)
-				continue
-			}
-			if strings.HasSuffix(native.Name, ".Announcement") {
-				text, _ := native.Value.(string)
-				if text != "" {
-					node, _ := e.access.ReadNode(ctx, native.Source)
-					e.emitLiveRegion(profile.Presentation{Speech: text, Braille: text}, node, native.Source, livePriority(native.Detail1))
-				}
-				continue
-			}
-			if strings.HasSuffix(native.Name, ".TextChanged") {
-				e.handleLiveTextChange(ctx, native)
-				continue
-			}
-			if strings.HasSuffix(native.Name, ".ChildrenChanged") {
-				e.handleLiveChildrenChange(ctx, native)
-				continue
-			}
-			if strings.HasSuffix(native.Name, ".PropertyChange") && (native.Detail == "accessible-name" || native.Detail == "accessible-description") {
-				e.handleLivePropertyChange(ctx, native)
-			}
+			e.handleNativeEvent(ctx, native)
 		}
+	}
+}
+
+func (e *Engine) handleNativeEvent(ctx context.Context, native NativeEvent) {
+	// Native reads, state changes and output belong to one session transaction.
+	// Sealing and cleanup must wait for the whole handler, including its AT-SPI
+	// reads, before they can release attribution or begin the next session.
+	if ctx.Err() != nil {
+		return
+	}
+	e.mu.RLock()
+	generation := e.sessionGeneration
+	e.mu.RUnlock()
+	select {
+	case e.commandGate <- struct{}{}:
+		defer func() { <-e.commandGate }()
+	case <-ctx.Done():
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	e.mu.RLock()
+	currentGeneration := e.sessionGeneration
+	e.mu.RUnlock()
+	if generation != currentGeneration {
+		return
+	}
+	if strings.Contains(native.Name, ".Document.") {
+		e.mu.Lock()
+		e.focus = native.Source
+		e.browserWindowActive = true
+		e.webContentFocused = true
+		e.graphDirty = true
+		e.mu.Unlock()
+	} else if strings.Contains(native.Name, ".Object.") {
+		e.mu.Lock()
+		e.graphDirty = true
+		e.mu.Unlock()
+	}
+	if strings.HasSuffix(native.Name, ".Focus") || (strings.HasSuffix(native.Name, ".StateChanged") && native.Detail == "focused" && native.Detail1 != 0) {
+		if !e.handleFocus(ctx, native.Source) {
+			return
+		}
+	}
+	if strings.HasSuffix(native.Name, ".StateChanged") {
+		e.handleStateChange(ctx, native)
+		return
+	}
+	if strings.HasSuffix(native.Name, ".Announcement") {
+		text, _ := native.Value.(string)
+		if text != "" {
+			node, _ := e.access.ReadNode(ctx, native.Source)
+			e.emitLiveRegion(profile.Presentation{Speech: text, Braille: text}, node, native.Source, livePriority(native.Detail1))
+		}
+		return
+	}
+	if strings.HasSuffix(native.Name, ".TextChanged") {
+		e.handleLiveTextChange(ctx, native)
+		return
+	}
+	if strings.HasSuffix(native.Name, ".ChildrenChanged") {
+		e.handleLiveChildrenChange(ctx, native)
+		return
+	}
+	if strings.HasSuffix(native.Name, ".PropertyChange") && (native.Detail == "accessible-name" || native.Detail == "accessible-description") {
+		e.handleLivePropertyChange(ctx, native)
 	}
 }
 
@@ -2657,6 +2932,7 @@ func (e *Engine) handleStateChange(ctx context.Context, native NativeEvent) {
 	if err != nil || node == nil {
 		return
 	}
+	node = e.protectNodeContent(node)
 	if node.States == nil {
 		node.States = map[string]bool{}
 	}
@@ -2910,6 +3186,7 @@ func (e *Engine) handleLiveTextChange(ctx context.Context, native NativeEvent) {
 	if err != nil {
 		return
 	}
+	node = e.protectNodeContent(node)
 	metadata, live := e.resolvedLiveRegionMetadata(ctx, node)
 	containerID := ""
 	if metadata.container != nil {
@@ -2962,6 +3239,7 @@ func (e *Engine) handleLiveChildrenChange(ctx context.Context, native NativeEven
 	if err != nil {
 		return
 	}
+	node = e.protectNodeContent(node)
 	metadata, live := e.resolvedLiveRegionMetadata(ctx, node)
 	if !live {
 		return
@@ -2983,7 +3261,7 @@ func (e *Engine) handleLiveChildrenChange(ctx context.Context, native NativeEven
 	changed := node
 	if native.ValueObject.Valid() {
 		if current, readErr := e.access.ReadNode(ctx, native.ValueObject); readErr == nil && current != nil {
-			changed = current
+			changed = e.protectNodeContent(current)
 		}
 	}
 	text := changed.SpokenContent()
@@ -3033,6 +3311,7 @@ func (e *Engine) handleLivePropertyChange(ctx context.Context, native NativeEven
 	if err != nil {
 		return
 	}
+	node = e.protectNodeContent(node)
 	metadata, live := e.resolvedLiveRegionMetadata(ctx, node)
 	if !live || !metadata.relevant["text"] {
 		return
@@ -3056,12 +3335,17 @@ func (e *Engine) readLiveRegionContent(ctx context.Context, container *model.Nod
 	if err != nil || root == nil {
 		return nil, ""
 	}
-	queue := []*model.Node{root}
+	type contentNode struct {
+		node      *model.Node
+		ancestors []string
+	}
+	stack := []contentNode{{node: root}}
 	seen := make(map[model.ObjectID]bool, 32)
 	parts := make([]string, 0, 8)
-	for len(queue) > 0 && len(seen) < 1024 {
-		node := queue[0]
-		queue = queue[1:]
+	for len(stack) > 0 && len(seen) < 1024 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		node := entry.node
 		if node == nil || seen[node.ID] {
 			continue
 		}
@@ -3072,7 +3356,9 @@ func (e *Engine) readLiveRegionContent(ctx context.Context, container *model.Nod
 		}
 		if value != "" {
 			redundant := false
-			for _, existing := range parts {
+			// Container text can repeat its descendants' text, but identical
+			// siblings are separate content. Deduplicate only against ancestors.
+			for _, existing := range entry.ancestors {
 				if existing == value || strings.Contains(existing, value) {
 					redundant = true
 					break
@@ -3082,13 +3368,24 @@ func (e *Engine) readLiveRegionContent(ctx context.Context, container *model.Nod
 				parts = append(parts, value)
 			}
 		}
-		for _, childID := range node.Children {
+		if node.IsProtected() {
+			// A protected object can expose descendants through its accessible
+			// tree. Their raw text inherits the enclosing object's protection.
+			continue
+		}
+		ancestors := entry.ancestors
+		if value != "" {
+			ancestors = append(slices.Clone(ancestors), value)
+		}
+		// A depth-first walk preserves the accessibility document order.
+		for index := len(node.Children) - 1; index >= 0; index-- {
+			childID := node.Children[index]
 			if seen[childID] {
 				continue
 			}
 			child, readErr := e.access.ReadNode(ctx, childID)
 			if readErr == nil && child != nil {
-				queue = append(queue, child)
+				stack = append(stack, contentNode{node: child, ancestors: ancestors})
 			}
 		}
 	}
@@ -3109,12 +3406,39 @@ func (e *Engine) emitLiveRegion(presentation profile.Presentation, node *model.N
 	if !e.presenter.Settings().ReportDynamicContentChanges {
 		return
 	}
+	if node == nil {
+		// Announcements can outlive their native objects. Retain protection from
+		// the cached source or its parent backlinks before a refresh replaces
+		// the graph; an unreadable, unknown source cannot establish safe content.
+		e.mu.RLock()
+		cached, _ := e.graph.Node(nativeSource)
+		fallback := model.Node{ID: nativeSource}
+		if cached != nil {
+			fallback = *cached
+		}
+		protected := fallback.IsProtected() || e.graph.ProtectsNodeContent(&fallback)
+		if protected {
+			fallback = fallback.RedactedContentCopy()
+		}
+		e.mu.RUnlock()
+		if cached == nil && !protected {
+			return
+		}
+		node = &fallback
+	}
+	node = e.protectNodeContent(node)
 	if node != nil && node.IsProtected() {
 		presentation.Speech = "[redacted]"
 		presentation.Braille = "[redacted]"
 	}
 	now := time.Now()
+	e.outputMu.Lock()
+	defer e.outputMu.Unlock()
 	e.mu.Lock()
+	if e.outputsSealed {
+		e.mu.Unlock()
+		return
+	}
 	// Chromium commonly exposes one DOM mutation as TextChanged followed by a
 	// delayed ChildrenChanged signal. Track each recent announcement rather than
 	// only the last one: assertive and polite transport signals can interleave.
@@ -3154,7 +3478,7 @@ func (e *Engine) emitLiveRegion(presentation profile.Presentation, node *model.N
 	command := e.causalEventCommand()
 	redacted := node != nil && node.IsProtected()
 	e.store.Append(events.Event{Kind: events.KindLiveRegion, SessionID: e.session(), CausalCommand: command, Source: source, Text: presentation.Speech, Reason: "liveRegion", Priority: priority, Provenance: events.ProvenanceAccessibilityEvent, Redacted: redacted})
-	e.emit(presentation, node, command, "liveRegion", priority)
+	e.emitEvidenceLocked(presentation, node, command, "liveRegion", priority, true)
 }
 
 func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
@@ -3186,6 +3510,7 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 			e.mu.RUnlock()
 		}
 	}
+	node = e.protectNodeContent(node)
 	isDocument := node.Role == "document web" || node.Role == "document frame"
 	e.mu.Lock()
 	if e.graph != nil {
@@ -3230,17 +3555,40 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	if isDocument {
 		e.graphDirty = true
 	}
-	if e.webContentFocused && (isDocument || e.cursor.Mode == "focus" || node.HasState("focusable")) {
+	preserveDocumentPosition := isDocument && e.graph.InDocument(e.cursor.Object, id)
+	if e.webContentFocused && !preserveDocumentPosition && (isDocument || e.cursor.Mode == "focus" || node.HasState("focusable")) {
 		e.cursor.Object, e.cursor.Offset = id, 0
 	}
 	e.mu.Unlock()
+	e.outputMu.Lock()
+	defer e.outputMu.Unlock()
+	e.mu.RLock()
+	sealed := e.outputsSealed
+	e.mu.RUnlock()
+	if sealed {
+		return isDocument
+	}
 	command := e.causalFocusCommand()
 	e.store.Append(events.Event{Kind: events.KindFocus, SessionID: e.session(), CausalCommand: command, Source: &id, Text: node.Name, Reason: "nativeFocus", Provenance: events.ProvenanceAccessibilityEvent, Redacted: node.IsProtected()})
 	if modeChanged {
 		e.store.Append(events.Event{Kind: events.KindMode, SessionID: e.session(), CausalCommand: command, Source: &id, Mode: mode, Reason: "automaticFocusMode", Provenance: events.ProvenanceScreenReaderEvent})
 	}
-	e.emit(e.presenter.Present(node, "focus"), node, command, "nativeFocus", "normal")
+	e.emitEvidenceLocked(e.presenter.Present(node, "focus"), node, command, "nativeFocus", "normal", true)
 	return isDocument
+}
+
+func (e *Engine) protectNodeContent(node *model.Node) *model.Node {
+	if node == nil {
+		return nil
+	}
+	e.mu.RLock()
+	inheritedProtection := e.graph.ProtectsNodeContent(node)
+	e.mu.RUnlock()
+	if inheritedProtection {
+		redacted := node.RedactedContentCopy()
+		return &redacted
+	}
+	return node
 }
 
 func nodeLooksLikeWebContent(node *model.Node) bool {
@@ -3308,4 +3656,11 @@ func livePriority(value int32) string {
 	}
 	return "polite"
 }
-func (e *Engine) session() string { e.mu.RLock(); defer e.mu.RUnlock(); return e.activeSession }
+func (e *Engine) session() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.outputsSealed {
+		return ""
+	}
+	return e.activeSession
+}
