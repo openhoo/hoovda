@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -286,6 +287,9 @@ func verifyFile(root, relative, expectedDigest string, decoded any) error {
 }
 
 func decodeStrict(data []byte, decoded any) error {
+	if err := rejectDuplicateFields(json.NewDecoder(strings.NewReader(string(data))), reflect.TypeOf(decoded)); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(decoded); err != nil {
@@ -301,6 +305,86 @@ func decodeStrict(data []byte, decoded any) error {
 	return nil
 }
 
+// Check object keys before decoding into structs: encoding/json otherwise uses
+// the last duplicate value, which makes contradictory evidence look valid.
+func rejectDuplicateFields(decoder *json.Decoder, shape reflect.Type) error {
+	for shape != nil && shape.Kind() == reflect.Pointer {
+		shape = shape.Elem()
+	}
+	// Raw evidence is intentionally an open JSON object, while all typed
+	// contracts require their exact declared field names.
+	if shape == reflect.TypeOf(json.RawMessage(nil)) {
+		shape = nil
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		var fields map[string]reflect.Type
+		if shape != nil && shape.Kind() == reflect.Struct {
+			fields = make(map[string]reflect.Type, shape.NumField())
+			for index := 0; index < shape.NumField(); index++ {
+				field := shape.Field(index)
+				name := strings.Split(field.Tag.Get("json"), ",")[0]
+				if field.PkgPath == "" && name != "-" {
+					if name == "" {
+						name = field.Name
+					}
+					fields[name] = field.Type
+				}
+			}
+		}
+		seen := map[string]bool{}
+		for decoder.More() {
+			key, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := key.(string)
+			if !ok {
+				return errors.New("JSON object key must be a string")
+			}
+			if seen[name] {
+				return fmt.Errorf("duplicate JSON field %q", name)
+			}
+			seen[name] = true
+			var childShape reflect.Type
+			if fields != nil {
+				var known bool
+				childShape, known = fields[name]
+				if !known {
+					return fmt.Errorf("unknown JSON field %q", name)
+				}
+			} else if shape != nil && shape.Kind() == reflect.Map {
+				childShape = shape.Elem()
+			}
+			if err := rejectDuplicateFields(decoder, childShape); err != nil {
+				return err
+			}
+		}
+	case '[':
+		var childShape reflect.Type
+		if shape != nil && (shape.Kind() == reflect.Array || shape.Kind() == reflect.Slice) {
+			childShape = shape.Elem()
+		}
+		for decoder.More() {
+			if err := rejectDuplicateFields(decoder, childShape); err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.New("unexpected JSON delimiter")
+	}
+	_, err = decoder.Token()
+	return err
+}
+
 func validateTrace(trace Trace, item Case, profileName, source string) string {
 	if trace.SchemaVersion != SchemaVersion || trace.CaseID != item.ID || trace.Profile != profileName || trace.Locale != item.Locale || trace.KeyboardLayout != item.KeyboardLayout {
 		return "trace identity does not match manifest"
@@ -313,14 +397,21 @@ func validateTrace(trace Trace, item Case, profileName, source string) string {
 	}
 	hasSpeech, hasBraille := false, false
 	for index, step := range trace.Steps {
+		if step.Speech == nil {
+			return fmt.Sprintf("step %d speech must be an array, including explicit empty output", index+1)
+		}
+		if step.Braille == nil {
+			return fmt.Sprintf("step %d braille must be an array, including explicit empty output", index+1)
+		}
 		if strings.TrimSpace(step.Command) == "" {
 			return fmt.Sprintf("step %d has no command", index+1)
 		}
 		if step.Mode != "browse" && step.Mode != "focus" {
 			return fmt.Sprintf("step %d mode must equal browse or focus", index+1)
 		}
-		hasSpeech = hasSpeech || len(step.Speech) > 0
-		hasBraille = hasBraille || len(step.Braille) > 0
+		nonBlank := func(text string) bool { return strings.TrimSpace(text) != "" }
+		hasSpeech = hasSpeech || slices.ContainsFunc(step.Speech, nonBlank)
+		hasBraille = hasBraille || slices.ContainsFunc(step.Braille, nonBlank)
 		if issue := validateStepEvidence(step, item, source); issue != "" {
 			return fmt.Sprintf("step %d %s", index+1, issue)
 		}

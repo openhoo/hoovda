@@ -1,14 +1,16 @@
 package input
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/openhoo/hoovda/internal/processoutput"
 )
 
 type Injector interface {
@@ -29,7 +31,20 @@ func (x *XDoTool) Press(ctx context.Context, gesture string) error {
 	}
 	gesture = normalizeForXDoTool(gesture)
 	parts := strings.Split(gesture, "+")
-	if len(parts) > 1 && (parts[0] == "Insert" || parts[0] == "Caps_Lock") {
+	virtualIndex := -1
+	for index, modifier := range parts[:len(parts)-1] {
+		if modifier == "Insert" || modifier == "Caps_Lock" {
+			virtualIndex = index
+			break
+		}
+	}
+	if virtualIndex >= 0 {
+		// Profile normalization places Ctrl/Alt/Shift before the virtual NVDA
+		// key. The AT-SPI virtual-key grab uses mask 0, so press it first before
+		// introducing physical modifiers, regardless of the input spelling.
+		virtual := parts[virtualIndex]
+		copy(parts[1:virtualIndex+1], parts[:virtualIndex])
+		parts[0] = virtual
 		release := func(modifier string) error {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 			defer cancel()
@@ -37,13 +52,15 @@ func (x *XDoTool) Press(ctx context.Context, gesture string) error {
 		}
 		held := make([]string, 0, len(parts)-1)
 		for _, modifier := range parts[:len(parts)-1] {
+			// XTest may deliver the key down before the command reports a failure
+			// or gets canceled. Release every attempted press, including this one.
+			held = append(held, modifier)
 			if err := run(ctx, command, "keydown", modifier); err != nil {
 				for index := len(held) - 1; index >= 0; index-- {
 					_ = release(held[index])
 				}
 				return err
 			}
-			held = append(held, modifier)
 		}
 		keyErr := run(ctx, command, "key", parts[len(parts)-1])
 		var releaseErr error
@@ -62,9 +79,9 @@ func (x *XDoTool) Press(ctx context.Context, gesture string) error {
 
 func run(ctx context.Context, command string, arguments ...string) error {
 	cmd := exec.CommandContext(ctx, command, arguments...)
-	var stderr bytes.Buffer
+	stderr := processoutput.Buffer{Limit: 64 << 10}
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := errors.Join(cmd.Run(), ctx.Err(), stderr.Err); err != nil {
 		return fmt.Errorf("inject key with %s: %w: %s", command, err, strings.TrimSpace(stderr.String()))
 	}
 	if message := strings.TrimSpace(stderr.String()); message != "" {

@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: true
       - run: go generate ./internal/atspi
       - run: git diff --exit-code -- internal/atspi/zz_generated_interfaces.go
@@ -31,5 +31,25 @@ jobs:
     needs: go
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.2'
+          cache: true
       - run: docker build --platform linux/amd64 --tag hoovda:ci .
       - run: docker run --rm --platform linux/amd64 hoovda:ci version
+      - name: Verify complete audio and video in the runtime image
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o ./hoovda-recording-tests ./internal/recording
+          docker run --rm --platform linux/amd64 \
+            --volume "$PWD/hoovda-recording-tests:/tmp/recording-tests:ro" \
+            --entrypoint /bin/sh hoovda:ci -ec '
+              command -v ffmpeg >/dev/null
+              command -v ffprobe >/dev/null
+              exec /tmp/recording-tests -test.run "^TestMuxPreservesCompleteFiniteAudioAndVideo$" -test.v
+            '
+      - name: Scan the built runtime binary
+        run: |
+          container_id=$(docker create --platform linux/amd64 hoovda:ci)
+          trap 'docker rm "$container_id" >/dev/null' EXIT
+          docker cp "$container_id:/usr/local/bin/hoovda" ./hoovda-ci
+          go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 -mode=binary ./hoovda-ci

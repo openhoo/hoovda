@@ -31,6 +31,8 @@ import (
 	"github.com/openhoo/hoovda/internal/synth"
 )
 
+const finishTimeout = 30 * time.Second
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "hoovda:", err)
@@ -105,7 +107,7 @@ func serve(args []string) error {
 	}
 	api, err := server.New(ctx, server.Config{
 		Token: cfg.ControlToken, Profile: cfg.Profile, Locale: cfg.Locale,
-		KeyboardLayout: cfg.KeyboardLayout, ActionTimeout: cfg.ActionTimeout,
+		KeyboardLayout: cfg.KeyboardLayout, ActionTimeout: cfg.ActionTimeout, FinishTimeout: finishTimeout,
 		QuietWindow: cfg.QuiescenceWindow,
 	}, screenreader, store, &input.XDoTool{Command: cfg.XDoToolCommand}, recorder, logger)
 	if err != nil {
@@ -116,11 +118,7 @@ func serve(args []string) error {
 		return err
 	}
 	defer listener.Close()
-	httpServer := &http.Server{
-		Handler: api.Handler(), ReadHeaderTimeout: 2 * time.Second,
-		ReadTimeout: cfg.ActionTimeout + 2*time.Second, WriteTimeout: max(45*time.Second, 2*cfg.ActionTimeout+5*time.Second),
-		IdleTimeout: 30 * time.Second,
-	}
+	httpServer := controlHTTPServer(ctx, api.Handler(), cfg.ActionTimeout)
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -136,6 +134,17 @@ func serve(args []string) error {
 	}
 	<-shutdownDone
 	return nil
+}
+
+func controlHTTPServer(ctx context.Context, handler http.Handler, actionTimeout time.Duration) *http.Server {
+	return &http.Server{
+		Handler: handler, ReadHeaderTimeout: 2 * time.Second,
+		ReadTimeout: actionTimeout + 2*time.Second,
+		// Cover both the 60-second event poll and all sequential finish stages.
+		WriteTimeout: max(65*time.Second, 2*finishTimeout+2*actionTimeout+5*time.Second),
+		IdleTimeout:  30 * time.Second,
+		BaseContext:  func(net.Listener) context.Context { return ctx },
+	}
 }
 
 func doctor(args []string) error {

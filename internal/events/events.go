@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -82,13 +83,23 @@ func (s *Store) Append(event Event) Event {
 	event.Sequence = s.next
 	s.next++
 	event.MonotonicNS = time.Since(s.started).Nanoseconds()
-	s.events = append(s.events, event)
+	s.events = append(s.events, cloneEvent(event))
 	if overflow := len(s.events) - s.limit; overflow > 0 {
 		copy(s.events, s.events[overflow:])
 		s.events = s.events[:s.limit]
 	}
 	close(s.changed)
 	s.changed = make(chan struct{})
+	return cloneEvent(event)
+}
+
+func cloneEvent(event Event) Event {
+	if event.Source != nil {
+		source := *event.Source
+		event.Source = &source
+	}
+	event.SpeechCommands = slices.Clone(event.SpeechCommands)
+	event.BrailleCells = slices.Clone(event.BrailleCells)
 	return event
 }
 
@@ -131,16 +142,39 @@ func (s *Store) Snapshot(after uint64, sessionID string) ([]Event, uint64, error
 	}
 	result := make([]Event, 0)
 	for _, event := range s.events {
-		if event.Sequence > after && (sessionID == "" || event.SessionID == "" || event.SessionID == sessionID) {
-			result = append(result, event)
+		if event.Sequence > after && (sessionID == "" || event.SessionID == sessionID) {
+			result = append(result, cloneEvent(event))
 		}
 	}
 	return result, current, nil
 }
 
 func (s *Store) Wait(ctx context.Context, after uint64, sessionID string, quiet time.Duration) ([]Event, uint64, bool, error) {
+	return s.wait(ctx, after, sessionID, quiet, true)
+}
+
+// Settle waits for a quiet interval even when there are no initial events.
+// Finalization uses this to capture pending output without waiting for a first
+// event that an empty session may never produce.
+func (s *Store) Settle(ctx context.Context, after uint64, sessionID string, quiet time.Duration) ([]Event, uint64, bool, error) {
+	items, cursor, timedOut, err := s.wait(ctx, after, sessionID, quiet, false)
+	if timedOut && err == nil {
+		err = ctx.Err()
+	}
+	return items, cursor, timedOut, err
+}
+
+func (s *Store) wait(ctx context.Context, after uint64, sessionID string, quiet time.Duration, requireEvent bool) ([]Event, uint64, bool, error) {
 	var lastCount int
 	var quietTimer *time.Timer
+	if !requireEvent {
+		quietTimer = time.NewTimer(quiet)
+	}
+	defer func() {
+		if quietTimer != nil {
+			quietTimer.Stop()
+		}
+	}()
 	for {
 		s.mu.RLock()
 		changed := s.changed
@@ -184,6 +218,11 @@ func (s *Store) Wait(ctx context.Context, after uint64, sessionID string, quiet 
 			return events, cursor, true, nil
 		case <-quietC:
 			events, cursor, snapshotErr := s.Snapshot(after, sessionID)
+			if snapshotErr == nil && len(events) != lastCount {
+				// An append can win the store lock after the timer fires but
+				// before this snapshot. Give its new events a full quiet window.
+				continue
+			}
 			return events, cursor, false, snapshotErr
 		case <-changed:
 		}
@@ -210,6 +249,11 @@ func (s *Store) WaitFor(ctx context.Context, after uint64, sessionID string, mat
 		select {
 		case <-ctx.Done():
 			result, cursor, snapshotErr := s.Snapshot(after, sessionID)
+			for _, event := range result {
+				if match(event) {
+					return result, cursor, true, snapshotErr
+				}
+			}
 			return result, cursor, false, snapshotErr
 		case <-changed:
 		}
