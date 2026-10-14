@@ -355,6 +355,12 @@ func validateActiveWebDocument(graph *model.Graph) error {
 	if active == nil {
 		return nil
 	}
+	// Embedded documents can legitimately be empty, including a focused SVG
+	// object. Completeness belongs to the containing page; requiring children
+	// on the embedded focus target would keep refreshing a complete graph.
+	if document, ok := graph.DocumentRoot(active.ID); ok {
+		active = graph.Nodes[document]
+	}
 	if len(active.Children) == 0 {
 		return fmt.Errorf("active web document %s has no accessible children", active.ID)
 	}

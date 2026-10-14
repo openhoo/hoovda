@@ -50,6 +50,62 @@ func TestValidateActiveWebDocumentAcceptsCompleteNewestDocument(t *testing.T) {
 	}
 }
 
+func TestValidateActiveWebDocumentAcceptsFocusedEmptyEmbeddedDocument(t *testing.T) {
+	for _, role := range []string{"document web", "document frame"} {
+		t.Run(role, func(t *testing.T) {
+			app := model.ObjectID{Bus: "app", Path: "/app"}
+			document := model.ObjectID{Bus: "app", Path: "/page"}
+			input := model.ObjectID{Bus: "app", Path: "/page/input"}
+			embedded := model.ObjectID{Bus: "app", Path: "/page/empty-svg"}
+			graph, err := model.NewGraph(app, map[model.ObjectID]*model.Node{
+				app:      {ID: app, Role: "application", Children: []model.ObjectID{document}},
+				document: {ID: document, Parent: app, Role: "document web", Children: []model.ObjectID{input, embedded}, States: map[string]bool{"showing": true}},
+				input:    {ID: input, Parent: document, Role: "entry", Name: "Starting input"},
+				embedded: {ID: embedded, Parent: document, Role: role, States: map[string]bool{"focused": true, "showing": true}},
+			}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateActiveWebDocument(graph); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestValidateActiveWebDocumentRejectsEmptyTopLevelDocument(t *testing.T) {
+	app := model.ObjectID{Bus: "app", Path: "/app"}
+	document := model.ObjectID{Bus: "app", Path: "/loading-page"}
+	graph, err := model.NewGraph(app, map[model.ObjectID]*model.Node{
+		app:      {ID: app, Role: "application", Children: []model.ObjectID{document}},
+		document: {ID: document, Parent: app, Role: "document web", States: map[string]bool{"focused": true, "showing": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateActiveWebDocument(graph); err == nil || !strings.Contains(err.Error(), "has no accessible children") {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
+func TestValidateActiveWebDocumentRejectsMissingEmbeddedChild(t *testing.T) {
+	app := model.ObjectID{Bus: "app", Path: "/app"}
+	document := model.ObjectID{Bus: "app", Path: "/page"}
+	embedded := model.ObjectID{Bus: "app", Path: "/page/frame"}
+	missing := model.ObjectID{Bus: "app", Path: "/page/frame/missing"}
+	graph, err := model.NewGraph(app, map[model.ObjectID]*model.Node{
+		app:      {ID: app, Role: "application", Children: []model.ObjectID{document}},
+		document: {ID: document, Parent: app, Role: "document web", Children: []model.ObjectID{embedded}, States: map[string]bool{"showing": true}},
+		embedded: {ID: embedded, Parent: document, Role: "document frame", Children: []model.ObjectID{missing}, States: map[string]bool{"focused": true, "showing": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateActiveWebDocument(graph); err == nil || !strings.Contains(err.Error(), "references missing child") {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
 func TestValidateActiveWebDocumentRejectsMissingActiveFrameChild(t *testing.T) {
 	app := model.ObjectID{Bus: "app", Path: "/app"}
 	frame := model.ObjectID{Bus: "app", Path: "/frame"}
