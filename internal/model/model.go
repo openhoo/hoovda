@@ -3,6 +3,7 @@ package model
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -95,7 +96,27 @@ func (n Node) SpokenContent() string {
 }
 
 func (n Node) IsProtected() bool {
-	return normalizeRole(n.Role) == "password text" || n.Attributes["hidden"] == "true"
+	return n.Redacted || normalizeRole(n.Role) == "password text" || n.Attributes["hidden"] == "true"
+}
+
+func (n Node) protectsDescendantContent() bool {
+	// Hidden controls mask their own text, but can contain ordinary accessible
+	// children such as the selected option in a collapsed combo-box menu. A
+	// driver may have already marked that hidden control redacted. Passwords
+	// and explicit content redaction carry confidentiality into descendants.
+	return normalizeRole(n.Role) == "password text" || (n.Redacted && n.Attributes["hidden"] != "true")
+}
+
+// RedactedContentCopy protects descendants whose accessible names and
+// descriptions can contain the enclosing protected object's raw value.
+func (n Node) RedactedContentCopy() Node {
+	n.Redacted = true
+	n.Name = "[redacted]"
+	n.Description = ""
+	n.RelationText = nil
+	n.RowHeaderText, n.ColumnHeaderText = nil, nil
+	n.CurrentValue, n.MinimumValue, n.MaximumValue = nil, nil, nil
+	return n.RedactedCopy()
 }
 
 func (n Node) RedactedCopy() Node {
@@ -163,10 +184,10 @@ func NewGraph(root ObjectID, nodes map[ObjectID]*Node, revision uint64) (*Graph,
 	if _, ok := nodes[root]; !ok {
 		return nil, fmt.Errorf("graph root is absent")
 	}
-	g := &Graph{Root: root, Nodes: nodes, Revision: revision}
+	g := &Graph{Root: root, Nodes: maps.Clone(nodes), Revision: revision}
 	visited := make(map[ObjectID]bool, len(nodes))
-	var walk func(ObjectID)
-	walk = func(id ObjectID) {
+	var walk func(ObjectID, bool)
+	walk = func(id ObjectID, protectedAncestor bool) {
 		if visited[id] {
 			return
 		}
@@ -175,14 +196,19 @@ func NewGraph(root ObjectID, nodes map[ObjectID]*Node, revision uint64) (*Graph,
 		if !ok {
 			return
 		}
+		if protectedAncestor {
+			redacted := node.RedactedContentCopy()
+			node = &redacted
+			g.Nodes[id] = node
+		}
 		if node.Semantic() {
 			g.Order = append(g.Order, id)
 		}
 		for _, child := range node.Children {
-			walk(child)
+			walk(child, protectedAncestor || node.protectsDescendantContent())
 		}
 	}
-	walk(root)
+	walk(root, false)
 	return g, nil
 }
 
@@ -192,6 +218,47 @@ func (g *Graph) Node(id ObjectID) (*Node, bool) {
 	}
 	node, ok := g.Nodes[id]
 	return node, ok
+}
+
+// ProtectsNodeContent resolves confidentiality for fresh native reads, including
+// children published before the graph contains their complete node. A cached
+// parent chain or child backlink can still establish their protected scope.
+func (g *Graph) ProtectsNodeContent(node *Node) bool {
+	if g == nil || node == nil {
+		return false
+	}
+	cached := g.Nodes[node.ID]
+	if cached != nil && cached.Redacted {
+		return true
+	}
+	protectedAncestor := func(id ObjectID) bool {
+		for steps := 0; id.Valid() && steps < 512; steps++ {
+			parent := g.Nodes[id]
+			if parent == nil {
+				return false
+			}
+			if parent.protectsDescendantContent() {
+				return true
+			}
+			id = parent.Parent
+		}
+		return false
+	}
+	parent := node.Parent
+	if !parent.Valid() && cached != nil {
+		parent = cached.Parent
+	}
+	if protectedAncestor(parent) {
+		return true
+	}
+	if cached == nil || !parent.Valid() {
+		for _, candidate := range g.Nodes {
+			if candidate != nil && slices.Contains(candidate.Children, node.ID) && protectedAncestor(candidate.ID) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (g *Graph) Index(id ObjectID) int {

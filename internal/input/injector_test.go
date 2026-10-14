@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/openhoo/hoovda/internal/profile"
 )
 
 func TestNormalizeForXDoTool(t *testing.T) {
@@ -51,5 +53,51 @@ func TestVirtualModifierChordUsesExplicitPressAndReverseRelease(t *testing.T) {
 	want := "keydown Caps_Lock\nkeydown shift\nkey s\nkeyup shift\nkeyup Caps_Lock\n"
 	if strings.ReplaceAll(string(got), "\r\n", "\n") != want {
 		t.Fatalf("calls = %q, want %q", got, want)
+	}
+}
+
+func TestFailedModifierPressStillReleasesAttemptedKey(t *testing.T) {
+	directory := t.TempDir()
+	logPath := filepath.Join(directory, "calls")
+	command := filepath.Join(directory, "xdotool")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOOVDA_INPUT_TEST_LOG\"\nif test \"$1\" = keydown; then printf 'XTest failure after key down' >&2; exit 1; fi\n"
+	if err := os.WriteFile(command, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOOVDA_INPUT_TEST_LOG", logPath)
+	if err := (&XDoTool{Command: command}).Press(context.Background(), "insert+f7"); err == nil {
+		t.Fatal("expected injection failure")
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "keydown Insert\nkeyup Insert\n" {
+		t.Fatalf("attempted modifier remains held: %q", got)
+	}
+}
+
+func TestCanonicalVirtualChordPressesNVDAKeyBeforePhysicalModifiers(t *testing.T) {
+	directory := t.TempDir()
+	logPath := filepath.Join(directory, "calls")
+	command := filepath.Join(directory, "xdotool")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOOVDA_INPUT_TEST_LOG\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOOVDA_INPUT_TEST_LOG", logPath)
+	injector := XDoTool{Command: command}
+	if err := injector.Press(context.Background(), profile.NormalizeGesture("insert+ctrl+f")); err != nil {
+		t.Fatal(err)
+	}
+	if err := injector.Press(context.Background(), profile.NormalizeGesture("-")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "keydown Insert\nkeydown ctrl\nkey f\nkeyup ctrl\nkeyup Insert\nkey --clearmodifiers minus\n"
+	if string(got) != want {
+		t.Fatalf("canonical virtual chord calls = %q, want %q", got, want)
 	}
 }

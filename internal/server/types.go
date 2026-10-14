@@ -101,10 +101,11 @@ type StateResult struct {
 }
 
 type EventsResult struct {
-	Cursor               uint64                        `json:"cursor"`
-	TimedOut             bool                          `json:"timedOut"`
-	Events               []events.Event                `json:"events"`
-	PresentationSettings *profile.PresentationSettings `json:"presentationSettings,omitempty"`
+	AudioTimeline        []recording.AudioTimelineEntry `json:"audioTimeline,omitempty"`
+	Cursor               uint64                         `json:"cursor"`
+	TimedOut             bool                           `json:"timedOut"`
+	Events               []events.Event                 `json:"events"`
+	PresentationSettings *profile.PresentationSettings  `json:"presentationSettings,omitempty"`
 }
 
 type DocumentResult struct {

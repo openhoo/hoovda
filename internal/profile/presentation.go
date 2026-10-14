@@ -699,13 +699,7 @@ func shouldPresentRelations(reason string) bool {
 
 func (p *Presenter) PresentText(node *model.Node, text string, unit model.TextUnit) Presentation {
 	speech := strings.TrimSpace(text)
-	if speech == "" {
-		if p.locale == "de-DE" {
-			speech = "leer"
-		} else {
-			speech = "blank"
-		}
-	} else if unit == model.TextUnitCharacter {
+	if unit == model.TextUnitCharacter {
 		switch text {
 		case " ":
 			if p.locale == "de-DE" {
@@ -725,6 +719,13 @@ func (p *Presenter) PresentText(node *model.Node, text string, unit model.TextUn
 			} else {
 				speech = "new line"
 			}
+		}
+	}
+	if speech == "" {
+		if p.locale == "de-DE" {
+			speech = "leer"
+		} else {
+			speech = "blank"
 		}
 	}
 	commands := []events.SpeechCommand{{Kind: "reason", Value: "textNavigation"}}

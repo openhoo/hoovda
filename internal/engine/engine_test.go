@@ -18,15 +18,16 @@ import (
 )
 
 type fakeAccess struct {
-	graph       *model.Graph
-	graphAtRead func(int) *model.Graph
-	readNodes   map[model.ObjectID]*model.Node
-	events      chan NativeEvent
-	graphReads  int
-	blockGraphs bool
-	focused     []model.ObjectID
-	activated   []model.ObjectID
-	mouse       []string
+	graph        *model.Graph
+	graphAtRead  func(int) *model.Graph
+	readNodes    map[model.ObjectID]*model.Node
+	events       chan NativeEvent
+	graphReads   int
+	blockGraphs  bool
+	focused      []model.ObjectID
+	activated    []model.ObjectID
+	selectionErr error
+	mouse        []string
 }
 
 func (f *fakeAccess) BrowserGraph(ctx context.Context, _ string, _ model.ObjectID) (*model.Graph, error) {
@@ -55,6 +56,9 @@ func (f *fakeAccess) GrabFocus(_ context.Context, id model.ObjectID) error {
 	return nil
 }
 func (f *fakeAccess) SetTextSelection(_ context.Context, id model.ObjectID, start, end int) error {
+	if f.selectionErr != nil {
+		return f.selectionErr
+	}
 	if node := f.graph.Nodes[id]; node != nil {
 		node.Selections = []model.TextRange{{Object: id, Start: start, End: end}}
 	}

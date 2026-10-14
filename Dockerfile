@@ -100,7 +100,9 @@ RUN test "$(PKG_CONFIG_PATH=/opt/hoovda-runtime/lib/x86_64-linux-gnu/pkgconfig p
  && cp espeak/COPYING* /opt/hoovda-third-party-licenses/espeak-ng/ \
  && cp liblouis/COPYING liblouis/COPYING.LESSER /opt/hoovda-third-party-licenses/liblouis/
 
-FROM docker.io/library/golang:1.27-bookworm@sha256:ba5ef6614ca131b80a635fc6a7b715d9ee8a7f333debdbb81afb68259c7d48d4 AS builder
+FROM docker.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
+
+ENV GOMAXPROCS=2
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -112,10 +114,11 @@ COPY tools ./tools
 ARG VERSION=0.0.0-dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go test ./... \
+RUN --mount=type=cache,id=hoovda-go-build-linux-amd64,target=/root/.cache/go-build,sharing=locked \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go test -count=1 -p=1 ./... \
  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath \
+    go build -p=1 -trimpath \
       -ldflags="-s -w -X github.com/openhoo/hoovda/internal/buildinfo.Version=${VERSION} -X github.com/openhoo/hoovda/internal/buildinfo.Commit=${COMMIT} -X github.com/openhoo/hoovda/internal/buildinfo.BuildDate=${BUILD_DATE}" \
       -o /out/hoovda ./cmd/hoovda
 
@@ -147,7 +150,9 @@ ENV PATH=/opt/hoovda-runtime/bin:$PATH \
     LD_LIBRARY_PATH=/opt/hoovda-runtime/lib/x86_64-linux-gnu:/opt/hoovda-runtime/lib \
     XDG_DATA_DIRS=/opt/hoovda-runtime/share:/usr/local/share:/usr/share
 
+ARG VERSION=0.0.0-dev
 LABEL org.opencontainers.image.title="HooVDA" \
+      org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.description="Independent Linux-native browser screenreader test engine" \
       org.opencontainers.image.source="https://github.com/openhoo/hoovda" \
       org.opencontainers.image.licenses="Apache-2.0 AND GPL-3.0-or-later AND LGPL-2.1-or-later" \

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,7 +175,7 @@ func TestSpeechOnlyEvidenceIsAllowedOnlyWithoutBrailleTag(t *testing.T) {
 		SchemaVersion: SchemaVersion, CaseID: item.ID, Source: "NVDA", Profile: "nvda-web-2026.1.1",
 		Locale: item.Locale, KeyboardLayout: item.KeyboardLayout,
 		Steps: []TraceStep{{
-			Command: "nextHeading", Speech: []string{"Heading"}, Mode: "browse",
+			Command: "nextHeading", Speech: []string{"Heading"}, Braille: []string{}, Mode: "browse",
 			Raw: json.RawMessage(`{"upstreamTest":"test_heading","gesture":"h"}`),
 		}},
 	}
@@ -195,6 +196,101 @@ func TestSemanticCoverageTagsRequireCorrectPinnedEvidence(t *testing.T) {
 	reference.Test = "test_tableInStyleDisplayTable"
 	if issue := validateCoverageEvidence("tables", []Reference{reference}); issue != "" {
 		t.Fatal(issue)
+	}
+}
+
+func TestIncompleteStepChannelsFailClosed(t *testing.T) {
+	for _, channel := range []string{"speech", "braille"} {
+		for _, null := range []bool{false, true} {
+			t.Run(channel+"-null-"+fmt.Sprint(null), func(t *testing.T) {
+				path := writeCorpus(t, false)
+				var manifest Manifest
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(data, &manifest); err != nil {
+					t.Fatal(err)
+				}
+				item := &manifest.Cases[0]
+				for _, trace := range []struct {
+					path string
+					hash *string
+				}{{item.Expected, &item.ExpectedSHA256}, {item.Observed, &item.ObservedSHA256}} {
+					tracePath := filepath.Join(filepath.Dir(path), trace.path)
+					data, err := os.ReadFile(tracePath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var decoded map[string]any
+					if err := json.Unmarshal(data, &decoded); err != nil {
+						t.Fatal(err)
+					}
+					steps := decoded["steps"].([]any)
+					step := map[string]any{}
+					for key, value := range steps[0].(map[string]any) {
+						step[key] = value
+					}
+					if null {
+						step[channel] = nil
+					} else {
+						delete(step, channel)
+					}
+					decoded["steps"] = append(steps, step)
+					data = marshalJSON(t, decoded)
+					writeFile(t, tracePath, data)
+					*trace.hash = digest(data)
+				}
+				writeFile(t, path, marshalJSON(t, manifest))
+				report, err := Check(path)
+				if err == nil || !slicesContainSubstring(report.Issues, channel+" must be an array") {
+					t.Fatalf("incomplete step passed: report=%#v err=%v", report, err)
+				}
+			})
+		}
+	}
+}
+
+func TestDuplicateJSONFieldsFailClosed(t *testing.T) {
+	for _, data := range []string{
+		`{"status":"incomplete","status":"complete"}`,
+		`{"oracle":{"product":"other","product":"NVDA"}}`,
+		`{"cases":[{"id":"first","id":"second"}]}`,
+	} {
+		var decoded map[string]any
+		if err := decodeStrict([]byte(data), &decoded); err == nil || !strings.Contains(err.Error(), "duplicate JSON field") {
+			t.Fatalf("duplicate keys accepted: %s err=%v", data, err)
+		}
+	}
+}
+
+func TestNonCanonicalJSONFieldsFailClosed(t *testing.T) {
+	for _, data := range []string{
+		`{"status":"incomplete","Status":"complete"}`,
+		`{"Status":"complete"}`,
+		`{"oracle":{"product":"other","Product":"NVDA"}}`,
+		`{"cases":[{"id":"first","ID":"second"}]}`,
+	} {
+		var decoded Manifest
+		if err := decodeStrict([]byte(data), &decoded); err == nil {
+			t.Fatalf("noncanonical typed fields accepted: %s", data)
+		}
+	}
+}
+
+func TestTaggedChannelsRequireNonBlankOutput(t *testing.T) {
+	for _, channel := range []string{"speech", "braille"} {
+		item := Case{ID: "empty-output", Locale: "en-US", KeyboardLayout: "desktop", Tags: []string{channel}, Reference: Reference{Test: "test_heading"}}
+		step := TraceStep{Command: "nextHeading", Speech: []string{"Heading"}, Braille: []string{"Heading"}, Mode: "browse", Raw: json.RawMessage(`{"upstreamTest":"test_heading","gesture":"h"}`)}
+		if channel == "speech" {
+			step.Speech = []string{"", " \n\t"}
+		} else {
+			step.Braille = []string{"", " \n\t"}
+		}
+		trace := Trace{SchemaVersion: SchemaVersion, CaseID: item.ID, Source: "NVDA", Profile: "nvda-web-2026.1.1", Locale: item.Locale, KeyboardLayout: item.KeyboardLayout, Steps: []TraceStep{step}}
+		if issue := validateTrace(trace, item, trace.Profile, "NVDA"); !strings.Contains(issue, "tagged "+channel+" has no") {
+			t.Fatalf("blank %s claimed coverage: issue=%q", channel, issue)
+		}
 	}
 }
 

@@ -1,12 +1,14 @@
 package synth
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/openhoo/hoovda/internal/processoutput"
 )
 
 type ESpeak struct {
@@ -43,9 +45,10 @@ func (e ESpeak) Synthesize(ctx context.Context, request Request) (Audio, error) 
 		"-a", strconv.Itoa(request.Volume),
 	)
 	command.Stdin = strings.NewReader(request.Text)
-	var stdout, stderr bytes.Buffer
+	stdout := processoutput.Buffer{Limit: maxWAVBytes}
+	stderr := processoutput.Buffer{Limit: 64 << 10}
 	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Run(); err != nil {
+	if err := errors.Join(command.Run(), ctx.Err(), stdout.Err, stderr.Err); err != nil {
 		return Audio{}, fmt.Errorf("espeak synthesis failed: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	audio, err := DecodeWAV(stdout.Bytes())

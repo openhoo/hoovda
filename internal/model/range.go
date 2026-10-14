@@ -62,7 +62,7 @@ func TextUnitRanges(id ObjectID, text string, unit TextUnit) ([]TextRange, error
 		starts := make([]int, 0)
 		inWord := false
 		for offset, character := range runes {
-			word := unicode.IsLetter(character) || unicode.IsNumber(character)
+			word := unicode.IsLetter(character) || unicode.IsNumber(character) || (inWord && unicode.IsMark(character))
 			if word && !inWord {
 				starts = append(starts, offset)
 			}

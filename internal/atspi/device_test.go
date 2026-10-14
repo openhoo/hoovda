@@ -333,3 +333,34 @@ func hasGrab(grabs []listenerGrab, mask uint32, keysym int32) bool {
 	}
 	return false
 }
+
+func TestDeviceWorkerPropagatesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	received := make(chan context.Context, 1)
+	forceRelease := make(chan struct{})
+	defer close(forceRelease)
+	listener := &DeviceListener{jobs: make(chan deviceJob, 1), handler: func(handlerCtx context.Context, _ string) (bool, error) {
+		received <- handlerCtx
+		select {
+		case <-handlerCtx.Done():
+		case <-forceRelease:
+		}
+		return true, nil
+	}}
+	released := make(chan struct{})
+	close(released)
+	listener.jobs <- deviceJob{gesture: "h", released: released}
+	go listener.run(ctx)
+	select {
+	case handlerCtx := <-received:
+		cancel()
+		select {
+		case <-handlerCtx.Done():
+		default:
+			t.Fatal("native command outlives canceled listener context")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("native command worker did not start")
+	}
+}
