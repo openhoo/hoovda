@@ -1,6 +1,6 @@
 module github.com/openhoo/hoovda
 
-go 1.27.2
+go 1.27.4
 
 require github.com/godbus/dbus/v5 v5.2.2
 
