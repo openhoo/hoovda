@@ -35,7 +35,12 @@ jobs:
         with:
           go-version: '1.27.2'
           cache: true
-      - run: docker build --platform linux/amd64 --tag hoovda:ci .
+      - name: Build source-attributed runtime image
+        run: |
+          docker build --platform linux/amd64 --tag hoovda:ci \
+            --build-arg VERSION=0.0.0-ci \
+            --build-arg COMMIT="$GITHUB_SHA" \
+            --build-arg BUILD_DATE="$(git show -s --format=%cI "$GITHUB_SHA")" .
       - run: docker run --rm --platform linux/amd64 hoovda:ci version
       - name: Verify complete audio and video in the runtime image
         run: |

@@ -151,8 +151,12 @@ ENV PATH=/opt/hoovda-runtime/bin:$PATH \
     XDG_DATA_DIRS=/opt/hoovda-runtime/share:/usr/local/share:/usr/share
 
 ARG VERSION=0.0.0-dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.title="HooVDA" \
       org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.description="Independent Linux-native browser screenreader test engine" \
       org.opencontainers.image.source="https://github.com/openhoo/hoovda" \
       org.opencontainers.image.licenses="Apache-2.0 AND GPL-3.0-or-later AND LGPL-2.1-or-later" \

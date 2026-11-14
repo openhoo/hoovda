@@ -180,6 +180,47 @@ func (p *Presenter) Present(node *model.Node, reason string) Presentation {
 	return Presentation{Speech: text, SpeechCommands: commands, Braille: p.presentBraille(node, reason, settings)}
 }
 
+// PresentFocus keeps newly entered semantic context and the focused object in
+// one utterance so that the object's synthesis cannot cancel its context.
+func (p *Presenter) PresentFocus(node *model.Node, enteredAncestors []*model.Node) Presentation {
+	values := make([]Presentation, 0, len(enteredAncestors)+1)
+	settings := p.Settings()
+	for _, ancestor := range enteredAncestors {
+		if ancestor == nil || ancestor.IsProtected() || ancestor.HasState("invisible") || ancestor.HasState("defunct") {
+			continue
+		}
+		role := focusContextRole(ancestor)
+		if role == "" || (role == "grouping" && (!settings.ReportGroupings || strings.TrimSpace(ancestor.Name) == "")) {
+			continue
+		}
+		// Ancestor context contains only explicit accessibility metadata. In
+		// particular, an unnamed dialog must not fall back to its body text or
+		// treat a disabled description as the object's spoken content.
+		descriptions := make([]string, 0, len(ancestor.RelationText["described by"])+1)
+		if settings.ReportObjectDescriptions && settings.ReportAriaDescription {
+			descriptions = appendDistinct(descriptions, ancestor.Description)
+		}
+		descriptions = appendDistinct(descriptions, ancestor.RelationText["described by"]...)
+		context := model.Node{
+			ID: ancestor.ID, Role: role, Name: ancestor.Name, Locale: ancestor.Locale, States: ancestor.States,
+			RelationText: map[string][]string{"described by": descriptions},
+		}
+		values = append(values, p.Present(&context, "focus"))
+	}
+	return combinePresentations(append(values, p.Present(node, "focus"))...)
+}
+
+func focusContextRole(node *model.Node) string {
+	role := strings.ToLower(strings.TrimSpace(node.Role))
+	if role == "dialog" {
+		return "dialog"
+	}
+	if role == "group" || role == "grouping" || (role == "panel" && (slices.Contains(strings.Fields(node.Attributes["xml-roles"]), "group") || strings.EqualFold(node.Attributes["tag"], "fieldset"))) {
+		return "grouping"
+	}
+	return ""
+}
+
 // PresentLandmarkEntry mirrors NVDA browse mode: quick navigation announces
 // the landmark boundary and the first readable object inside that landmark.
 func (p *Presenter) PresentLandmarkEntry(landmark, first *model.Node) Presentation {
@@ -1333,6 +1374,7 @@ func (p *Presenter) role(role string) string {
 		"slider": "Schieber", "progress bar": "Fortschrittsbalken", "image": "Grafik", "graphic": "Grafik",
 		"content insertion": "eingefügt", "content deletion": "gelöscht",
 		"separator": "Trennlinie", "article": "Artikel", "paragraph": "Absatz", "math": "Mathematisch",
+		"grouping": "Gruppierung",
 	}
 	if translated, ok := german[role]; ok {
 		return translated
