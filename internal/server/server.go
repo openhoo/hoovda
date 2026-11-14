@@ -417,11 +417,7 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	startedSequence := before
 	for _, event := range observed {
-		if event.Kind == events.KindCommandStarted && event.CausalCommand == command.ID {
-			startedSequence = event.Sequence
-		}
 		if event.Kind != events.KindCommandSettled || event.CausalCommand != command.ID || event.Reason == "completed" {
 			continue
 		}
@@ -433,7 +429,7 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if commandNeedsNativeFocus(command.ID, observed) {
-		_, _, focused, err := s.store.WaitFor(ctx, startedSequence, session.ID, func(event events.Event) bool {
+		_, _, focused, err := s.store.WaitFor(ctx, before, session.ID, func(event events.Event) bool {
 			return event.Kind == events.KindFocus && event.CausalCommand == command.ID
 		})
 		if err != nil {
@@ -453,7 +449,10 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "event_cursor", err)
 		return
 	}
-	resultEvents = filterActionResultEvents(resultEvents, command.ID, startedSequence)
+	// An unconsumed key can produce native output before its queued key-release
+	// callback records commandStarted. The request cursor bounds that output;
+	// the matching command lifecycle must still have completed successfully.
+	resultEvents = filterActionResultEvents(resultEvents, command.ID, before)
 	state, err := s.stateResult(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "state_refresh", err)
@@ -462,9 +461,9 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ActionResult{Command: command.ID, Gesture: gesture, Delivery: delivery, BeforeSequence: before, Cursor: cursor, TimedOut: timedOut, Events: resultEvents, State: state})
 }
 
-func filterActionResultEvents(result []events.Event, commandID string, startedSequence uint64) []events.Event {
+func filterActionResultEvents(result []events.Event, commandID string, beforeSequence uint64) []events.Event {
 	return slices.DeleteFunc(result, func(event events.Event) bool {
-		return event.CausalCommand != commandID || event.Sequence < startedSequence
+		return event.CausalCommand != commandID || event.Sequence <= beforeSequence
 	})
 }
 

@@ -594,18 +594,19 @@ func (e *Engine) HandleGesture(ctx context.Context, gesture string) (bool, error
 	if !ok {
 		return false, nil
 	}
-	consume, err := e.execute(ctx, command, "", true)
+	consume, err := e.execute(ctx, command, "", true, nil)
 	return consume, err
 }
 
 // HandlePhysicalGesture executes a command after the control server prepared
 // its graph. It must not query AT-SPI from a synchronous device callback.
-func (e *Engine) HandlePhysicalGesture(ctx context.Context, gesture string) (bool, error) {
+// consumed retains the key-press decision made before native focus can change.
+func (e *Engine) HandlePhysicalGesture(ctx context.Context, gesture string, consumed bool) (bool, error) {
 	command, ok := profile.CommandByGesture(gesture, e.cfg.KeyboardLayout)
 	if !ok {
 		return false, nil
 	}
-	return e.execute(ctx, command, "", false)
+	return e.execute(ctx, command, "", false, &consumed)
 }
 
 func (e *Engine) PreparePhysicalCommand(ctx context.Context, commandID string) error {
@@ -657,7 +658,7 @@ func (e *Engine) ExecuteDirect(ctx context.Context, commandID string) error {
 	if !ok {
 		return fmt.Errorf("unsupported command %q", commandID)
 	}
-	_, err := e.execute(ctx, command, "", true)
+	_, err := e.execute(ctx, command, "", true, nil)
 	return err
 }
 
@@ -666,11 +667,11 @@ func (e *Engine) ExecuteDirectWithArgument(ctx context.Context, commandID, argum
 	if !ok {
 		return fmt.Errorf("unsupported command %q", commandID)
 	}
-	_, err := e.execute(ctx, command, argument, true)
+	_, err := e.execute(ctx, command, argument, true, nil)
 	return err
 }
 
-func (e *Engine) execute(ctx context.Context, command profile.Command, argument string, refreshGraph bool) (bool, error) {
+func (e *Engine) execute(ctx context.Context, command profile.Command, argument string, refreshGraph bool, physicalConsume *bool) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -694,6 +695,10 @@ func (e *Engine) execute(ctx context.Context, command profile.Command, argument 
 	}
 	e.store.Append(events.Event{Kind: events.KindCommandStarted, SessionID: sessionID, CausalCommand: command.ID, Text: command.Label, Provenance: events.ProvenanceAdapterLifecycle})
 	consume := commandConsumes(command, mode, singleLetter)
+	if physicalConsume != nil {
+		// A passed-through key can change native focus before its queued handler.
+		consume = *physicalConsume
+	}
 	var err error
 	if refreshGraph && profile.CommandNeedsGraph(command) {
 		err = e.refreshIfDirty(ctx)
@@ -704,8 +709,7 @@ func (e *Engine) execute(ctx context.Context, command profile.Command, argument 
 	}
 	switch command.Category {
 	case "quickNavigation":
-		if !singleLetter {
-			consume = false
+		if !consume {
 			break
 		}
 		err = e.navigate(command)
@@ -3667,6 +3671,9 @@ func focusModeTarget(graph *model.Graph, node *model.Node) bool {
 	for id, steps := node.Parent, 0; graph != nil && id.Valid() && steps < 512; id, steps = graph.Nodes[id].Parent, steps+1 {
 		ancestor := graph.Nodes[id]
 		if ancestor == nil {
+			break
+		}
+		if role := strings.ToLower(ancestor.Role); role == "document web" || role == "document frame" {
 			break
 		}
 		if strings.ToLower(ancestor.Role) == "application" || strings.Contains(ancestor.Attributes["xml-roles"], "application") {

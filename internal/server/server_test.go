@@ -654,13 +654,13 @@ func TestExitEmbeddedObjectRequiresFocusOnlyForActualBoundaryExit(t *testing.T) 
 	}
 }
 
-func TestActionResultExcludesEventsMisattributedBeforeCommandStart(t *testing.T) {
+func TestActionResultExcludesEventsAtOrBeforeActionBoundary(t *testing.T) {
 	result := filterActionResultEvents([]events.Event{
 		{Sequence: 10, Kind: events.KindFocus, CausalCommand: "exitEmbeddedObject", Text: "late prior focus"},
 		{Sequence: 11, Kind: events.KindCommandStarted, CausalCommand: "exitEmbeddedObject"},
 		{Sequence: 12, Kind: events.KindCommandSettled, CausalCommand: "exitEmbeddedObject", Reason: "completed"},
 		{Sequence: 13, Kind: events.KindSpeech, CausalCommand: "nextHeading", Text: "unrelated"},
-	}, "exitEmbeddedObject", 11)
+	}, "exitEmbeddedObject", 10)
 	if len(result) != 2 || result[0].Sequence != 11 || result[1].Sequence != 12 {
 		t.Fatalf("filtered result = %#v", result)
 	}
@@ -920,7 +920,7 @@ func TestSealedSessionDoesNotPublishLaterPhysicalCommandEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := server.store.Cursor()
-	if _, err := server.engine.HandlePhysicalGesture(context.Background(), "h"); err == nil {
+	if _, err := server.engine.HandlePhysicalGesture(context.Background(), "h", false); err == nil {
 		t.Fatal("sealed session accepted a later physical command")
 	}
 	items, _, err := server.store.Snapshot(before, session.ID)
@@ -949,7 +949,7 @@ func TestFinishWaitsForNativeCommandAlreadyInProgress(t *testing.T) {
 	}
 	commandDone := make(chan error, 1)
 	go func() {
-		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter")
+		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter", true)
 		commandDone <- err
 	}()
 	<-started
@@ -1002,7 +1002,7 @@ func TestFinishNativeCommandDeadlinePreservesRetry(t *testing.T) {
 	}
 	commandDone := make(chan error, 1)
 	go func() {
-		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter")
+		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter", true)
 		commandDone <- err
 	}()
 	<-started
@@ -1054,7 +1054,7 @@ func TestAbandonmentDeadlineDoesNotOverlapUnfinishedNativeCommand(t *testing.T) 
 	}
 	commandDone := make(chan error, 1)
 	go func() {
-		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter")
+		_, err := server.engine.HandlePhysicalGesture(context.Background(), "enter", true)
 		commandDone <- err
 	}()
 	<-started
