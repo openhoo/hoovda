@@ -118,6 +118,8 @@ type Engine struct {
 	refreshMu               sync.Mutex
 	graph                   *model.Graph
 	graphDirty              bool
+	focusContextVersion     uint64
+	graphContextVersion     uint64
 	cursor                  model.Cursor
 	navigator               model.ObjectID
 	review                  model.Cursor
@@ -126,6 +128,7 @@ type Engine struct {
 	reviewSelection         model.TextRange
 	reviewSelectionSet      bool
 	focus                   model.ObjectID
+	focusContext            []model.ObjectID
 	ready                   bool
 	browserWindowActive     bool
 	webContentFocused       bool
@@ -201,6 +204,7 @@ func (e *Engine) Refresh(ctx context.Context) error {
 	e.mu.RLock()
 	preferred := model.ObjectID{}
 	focusAtStart := e.focus
+	focusContextVersion := e.focusContextVersion
 	if e.webContentFocused {
 		preferred = focusAtStart
 		if document, ok := e.graph.DocumentRoot(focusAtStart); ok {
@@ -215,6 +219,7 @@ func (e *Engine) Refresh(ctx context.Context) error {
 	e.mu.Lock()
 	oldGraph := e.graph
 	e.graph = graph
+	e.graphContextVersion = focusContextVersion
 	e.liveRegionKnown = make(map[model.ObjectID]bool, len(graph.Nodes))
 	for id := range graph.Nodes {
 		e.liveRegionKnown[id] = true
@@ -355,6 +360,7 @@ func (e *Engine) BeginSession(id string) error {
 	e.presentationBaselineSet = true
 	e.recentLiveRegions = make(map[liveRegionAnnouncement]time.Time)
 	e.atomicLiveRegionOwners = make(map[model.ObjectID]model.ObjectID)
+	e.focusContext = nil
 	return nil
 }
 
@@ -588,18 +594,19 @@ func (e *Engine) HandleGesture(ctx context.Context, gesture string) (bool, error
 	if !ok {
 		return false, nil
 	}
-	consume, err := e.execute(ctx, command, "", true)
+	consume, err := e.execute(ctx, command, "", true, nil)
 	return consume, err
 }
 
 // HandlePhysicalGesture executes a command after the control server prepared
 // its graph. It must not query AT-SPI from a synchronous device callback.
-func (e *Engine) HandlePhysicalGesture(ctx context.Context, gesture string) (bool, error) {
+// consumed retains the key-press decision made before native focus can change.
+func (e *Engine) HandlePhysicalGesture(ctx context.Context, gesture string, consumed bool) (bool, error) {
 	command, ok := profile.CommandByGesture(gesture, e.cfg.KeyboardLayout)
 	if !ok {
 		return false, nil
 	}
-	return e.execute(ctx, command, "", false)
+	return e.execute(ctx, command, "", false, &consumed)
 }
 
 func (e *Engine) PreparePhysicalCommand(ctx context.Context, commandID string) error {
@@ -651,7 +658,7 @@ func (e *Engine) ExecuteDirect(ctx context.Context, commandID string) error {
 	if !ok {
 		return fmt.Errorf("unsupported command %q", commandID)
 	}
-	_, err := e.execute(ctx, command, "", true)
+	_, err := e.execute(ctx, command, "", true, nil)
 	return err
 }
 
@@ -660,11 +667,11 @@ func (e *Engine) ExecuteDirectWithArgument(ctx context.Context, commandID, argum
 	if !ok {
 		return fmt.Errorf("unsupported command %q", commandID)
 	}
-	_, err := e.execute(ctx, command, argument, true)
+	_, err := e.execute(ctx, command, argument, true, nil)
 	return err
 }
 
-func (e *Engine) execute(ctx context.Context, command profile.Command, argument string, refreshGraph bool) (bool, error) {
+func (e *Engine) execute(ctx context.Context, command profile.Command, argument string, refreshGraph bool, physicalConsume *bool) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -688,6 +695,10 @@ func (e *Engine) execute(ctx context.Context, command profile.Command, argument 
 	}
 	e.store.Append(events.Event{Kind: events.KindCommandStarted, SessionID: sessionID, CausalCommand: command.ID, Text: command.Label, Provenance: events.ProvenanceAdapterLifecycle})
 	consume := commandConsumes(command, mode, singleLetter)
+	if physicalConsume != nil {
+		// A passed-through key can change native focus before its queued handler.
+		consume = *physicalConsume
+	}
 	var err error
 	if refreshGraph && profile.CommandNeedsGraph(command) {
 		err = e.refreshIfDirty(ctx)
@@ -698,8 +709,7 @@ func (e *Engine) execute(ctx context.Context, command profile.Command, argument 
 	}
 	switch command.Category {
 	case "quickNavigation":
-		if !singleLetter {
-			consume = false
+		if !consume {
 			break
 		}
 		err = e.navigate(command)
@@ -2881,10 +2891,14 @@ func (e *Engine) handleNativeEvent(ctx context.Context, native NativeEvent) {
 		e.browserWindowActive = true
 		e.webContentFocused = true
 		e.graphDirty = true
+		e.focusContextVersion++
 		e.mu.Unlock()
 	} else if strings.Contains(native.Name, ".Object.") {
 		e.mu.Lock()
 		e.graphDirty = true
+		if invalidatesFocusContext(native) {
+			e.focusContextVersion++
+		}
 		e.mu.Unlock()
 	}
 	if strings.HasSuffix(native.Name, ".Focus") || (strings.HasSuffix(native.Name, ".StateChanged") && native.Detail == "focused" && native.Detail1 != 0) {
@@ -2915,6 +2929,15 @@ func (e *Engine) handleNativeEvent(ctx context.Context, native NativeEvent) {
 	if strings.HasSuffix(native.Name, ".PropertyChange") && (native.Detail == "accessible-name" || native.Detail == "accessible-description") {
 		e.handleLivePropertyChange(ctx, native)
 	}
+}
+
+func invalidatesFocusContext(native NativeEvent) bool {
+	for _, suffix := range []string{".ChildrenChanged", ".PropertyChange", ".AttributesChanged", ".TextChanged"} {
+		if strings.HasSuffix(native.Name, suffix) {
+			return true
+		}
+	}
+	return strings.HasSuffix(native.Name, ".StateChanged") && slices.Contains([]string{"visible", "invisible", "showing", "defunct", "enabled", "sensitive"}, native.Detail)
 }
 
 func (e *Engine) handleStateChange(ctx context.Context, native NativeEvent) {
@@ -3490,11 +3513,14 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	e.mu.RLock()
 	known := e.graph != nil && e.graph.Nodes[id] != nil
 	knownWebContent := known && hasDocumentAncestor(e.graph, id)
+	contextStale := e.focusContextVersion != e.graphContextVersion
 	e.mu.RUnlock()
-	if !known {
+	if !known || contextStale {
 		// Focus signals include browser chrome and can race application teardown.
 		// Never let this event-loop refresh inherit the process-lifetime context:
 		// a vanished preferred object would otherwise retain refreshMu forever.
+		// Structural and metadata events also invalidate known objects' parent
+		// context; ordinary focus changes do not require a full graph read.
 		refreshCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		refreshErr := e.Refresh(refreshCtx)
 		cancel()
@@ -3511,14 +3537,32 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 		}
 	}
 	node = e.protectNodeContent(node)
+	nodeCopy := *node
+	node = &nodeCopy
 	isDocument := node.Role == "document web" || node.Role == "document frame"
 	e.mu.Lock()
 	if e.graph != nil {
 		if existing := e.graph.Nodes[id]; existing != nil {
+			if !node.Parent.Valid() {
+				node.Parent = existing.Parent
+			}
 			node.RowHeaderText = append([]string(nil), existing.RowHeaderText...)
 			node.ColumnHeaderText = append([]string(nil), existing.ColumnHeaderText...)
 			node.RelationText = cloneRelationText(existing.RelationText)
 		}
+	}
+	contextChain := focusContextChain(e.graph, node)
+	common := 0
+	for common < len(e.focusContext) && common < len(contextChain) && e.focusContext[common] == contextChain[common].ID {
+		common++
+	}
+	var enteredAncestors []*model.Node
+	if common < len(contextChain)-1 {
+		enteredAncestors = contextChain[common : len(contextChain)-1]
+	}
+	e.focusContext = make([]model.ObjectID, len(contextChain))
+	for index, ancestor := range contextChain {
+		e.focusContext[index] = ancestor.ID
 	}
 	e.focus = id
 	e.navigator = id
@@ -3573,8 +3617,22 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	if modeChanged {
 		e.store.Append(events.Event{Kind: events.KindMode, SessionID: e.session(), CausalCommand: command, Source: &id, Mode: mode, Reason: "automaticFocusMode", Provenance: events.ProvenanceScreenReaderEvent})
 	}
-	e.emitEvidenceLocked(e.presenter.Present(node, "focus"), node, command, "nativeFocus", "normal", true)
+	e.emitEvidenceLocked(e.presenter.PresentFocus(node, enteredAncestors), node, command, "nativeFocus", "normal", true)
 	return isDocument
+}
+
+// Keep the presented path independently of the graph: a refresh can remove the
+// previous focus object while retaining ancestors shared with its replacement.
+func focusContextChain(graph *model.Graph, node *model.Node) []*model.Node {
+	var chain []*model.Node
+	seen := make(map[model.ObjectID]bool)
+	for node != nil && node.ID.Valid() && !seen[node.ID] && len(chain) < 512 {
+		seen[node.ID] = true
+		chain = append(chain, node)
+		node, _ = graph.Node(node.Parent)
+	}
+	slices.Reverse(chain)
+	return chain
 }
 
 func (e *Engine) protectNodeContent(node *model.Node) *model.Node {
@@ -3613,6 +3671,9 @@ func focusModeTarget(graph *model.Graph, node *model.Node) bool {
 	for id, steps := node.Parent, 0; graph != nil && id.Valid() && steps < 512; id, steps = graph.Nodes[id].Parent, steps+1 {
 		ancestor := graph.Nodes[id]
 		if ancestor == nil {
+			break
+		}
+		if role := strings.ToLower(ancestor.Role); role == "document web" || role == "document frame" {
 			break
 		}
 		if strings.ToLower(ancestor.Role) == "application" || strings.Contains(ancestor.Attributes["xml-roles"], "application") {

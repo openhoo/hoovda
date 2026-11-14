@@ -27,11 +27,12 @@ var keypadHardwareKeys = map[uint32]string{
 	91: "numpaddelete", 104: "numpadenter", 106: "numpaddivide",
 }
 
-type GestureHandler func(context.Context, string) (bool, error)
+type GestureHandler func(context.Context, string, bool) (bool, error)
 type GestureConsumer func(string) bool
 type deviceJob struct {
 	gesture  string
 	released <-chan struct{}
+	consume  bool
 }
 type pendingKey struct {
 	released chan struct{}
@@ -88,7 +89,7 @@ func (l *DeviceListener) run(ctx context.Context) {
 				timer.Stop()
 			case <-timer.C:
 			}
-			_, _ = l.handler(ctx, job.gesture)
+			_, _ = l.handler(ctx, job.gesture, job.consume)
 		}
 	}
 }
@@ -318,11 +319,11 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 	if !ok {
 		return false, nil
 	}
+	consume := command.ConsumesBrowse
+	if l.consumer != nil {
+		consume = l.consumer(gesture)
+	}
 	if l.jobs != nil && profile.CommandNeedsGraph(command) {
-		consume := command.ConsumesBrowse
-		if l.consumer != nil {
-			consume = l.consumer(gesture)
-		}
 		releaseKey := deviceEventIdentity(event, key)
 		if previous, ok := l.pending[releaseKey]; ok {
 			close(previous.released)
@@ -330,7 +331,7 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 		released := make(chan struct{})
 		l.pending[releaseKey] = pendingKey{released: released, consume: consume}
 		select {
-		case l.jobs <- deviceJob{gesture: gesture, released: released}:
+		case l.jobs <- deviceJob{gesture: gesture, released: released, consume: consume}:
 			return consume, nil
 		default:
 			delete(l.pending, releaseKey)
@@ -338,7 +339,7 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 			return false, DBusError(fmt.Errorf("device command queue is full"))
 		}
 	}
-	consume, err := l.handler(context.Background(), gesture)
+	consume, err := l.handler(context.Background(), gesture, consume)
 	return consume, DBusError(err)
 }
 

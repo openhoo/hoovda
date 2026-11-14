@@ -11,7 +11,7 @@ func TestDeviceListenerHandlesPressNotRelease(t *testing.T) {
 	called := 0
 	listener := &DeviceListener{
 		layout: "desktop",
-		handler: func(_ context.Context, gesture string) (bool, error) {
+		handler: func(_ context.Context, gesture string, _ bool) (bool, error) {
 			called++
 			if gesture != "f6" {
 				t.Fatalf("gesture = %q", gesture)
@@ -40,7 +40,7 @@ func TestDeviceListenerDispatchesOutsideSynchronousDBusCallback(t *testing.T) {
 		consumer: func(gesture string) bool {
 			return gesture == "insert+k"
 		},
-		handler: func(_ context.Context, gesture string) (bool, error) {
+		handler: func(_ context.Context, gesture string, _ bool) (bool, error) {
 			if gesture != "insert+k" {
 				t.Errorf("gesture = %q", gesture)
 			}
@@ -82,6 +82,57 @@ func TestDeviceListenerDispatchesOutsideSynchronousDBusCallback(t *testing.T) {
 		t.Fatal("queued command did not start")
 	}
 	close(release)
+}
+
+func TestDeviceListenerPreservesConsumptionDecisionUntilQueuedHandler(t *testing.T) {
+	for _, consumeAtPress := range []bool{false, true} {
+		name := "passed-through key becomes consumable before release"
+		if consumeAtPress {
+			name = "consumed key becomes pass-through before release"
+		}
+		t.Run(name, func(t *testing.T) {
+			currentDecision := consumeAtPress
+			handled := make(chan bool, 1)
+			listener := &DeviceListener{
+				layout:  "desktop",
+				jobs:    make(chan deviceJob, 1),
+				pending: make(map[string]pendingKey),
+				consumer: func(gesture string) bool {
+					if gesture != "enter" {
+						t.Errorf("gesture = %q", gesture)
+					}
+					return currentDecision
+				},
+				handler: func(_ context.Context, gesture string, consumed bool) (bool, error) {
+					if gesture != "enter" {
+						t.Errorf("queued gesture = %q", gesture)
+					}
+					handled <- consumed
+					return consumed, nil
+				},
+			}
+			pressed, dbusErr := listener.NotifyEvent(DeviceEvent{Type: keyPressedEvent, HWCode: 36, EventString: "Return"})
+			if dbusErr != nil || pressed != consumeAtPress {
+				t.Fatalf("press consumed=%v, want %v; error=%v", pressed, consumeAtPress, dbusErr)
+			}
+			currentDecision = !consumeAtPress
+			released, dbusErr := listener.NotifyEvent(DeviceEvent{Type: keyReleasedEvent, HWCode: 36, EventString: "Return"})
+			if dbusErr != nil || released != consumeAtPress {
+				t.Fatalf("release consumed=%v, want %v; error=%v", released, consumeAtPress, dbusErr)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go listener.run(ctx)
+			select {
+			case consumed := <-handled:
+				if consumed != consumeAtPress {
+					t.Errorf("queued handler consumption=%v, want original press decision %v", consumed, consumeAtPress)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("queued key lost its handler lifecycle")
+			}
+		})
+	}
 }
 
 func TestListenerGrabsAreSpecificAndCoverLayouts(t *testing.T) {
@@ -167,7 +218,7 @@ func TestX11CapsLockNameNormalizesToVirtualModifier(t *testing.T) {
 	var gestures []string
 	listener := &DeviceListener{
 		layout: "laptop",
-		handler: func(_ context.Context, gesture string) (bool, error) {
+		handler: func(_ context.Context, gesture string, _ bool) (bool, error) {
 			gestures = append(gestures, gesture)
 			return true, nil
 		},
@@ -273,7 +324,7 @@ func TestVirtualModifierCannotStickAfterChord(t *testing.T) {
 	var gestures []string
 	listener := &DeviceListener{
 		layout: "desktop",
-		handler: func(_ context.Context, gesture string) (bool, error) {
+		handler: func(_ context.Context, gesture string, _ bool) (bool, error) {
 			gestures = append(gestures, gesture)
 			return true, nil
 		},
@@ -299,7 +350,7 @@ func TestVirtualModifierSurvivesConstituentModifierPresses(t *testing.T) {
 	var gestures []string
 	listener := &DeviceListener{
 		layout: "desktop",
-		handler: func(_ context.Context, gesture string) (bool, error) {
+		handler: func(_ context.Context, gesture string, _ bool) (bool, error) {
 			gestures = append(gestures, gesture)
 			return true, nil
 		},
@@ -340,7 +391,7 @@ func TestDeviceWorkerPropagatesCancellation(t *testing.T) {
 	received := make(chan context.Context, 1)
 	forceRelease := make(chan struct{})
 	defer close(forceRelease)
-	listener := &DeviceListener{jobs: make(chan deviceJob, 1), handler: func(handlerCtx context.Context, _ string) (bool, error) {
+	listener := &DeviceListener{jobs: make(chan deviceJob, 1), handler: func(handlerCtx context.Context, _ string, _ bool) (bool, error) {
 		received <- handlerCtx
 		select {
 		case <-handlerCtx.Done():
