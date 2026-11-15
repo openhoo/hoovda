@@ -378,22 +378,10 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "input_injection", err)
 			return
 		}
-		acknowledgementTimeout := min(s.cfg.ActionTimeout/5, 500*time.Millisecond)
-		ackCtx, cancelAcknowledgement := context.WithTimeout(ctx, acknowledgementTimeout)
-		_, _, started, ackErr := s.store.WaitFor(ackCtx, before, session.ID, func(event events.Event) bool {
-			return event.Kind == events.KindCommandStarted && event.CausalCommand == command.ID
-		})
-		cancelAcknowledgement()
-		if ackErr != nil {
-			writeError(w, http.StatusBadRequest, "event_cursor", ackErr)
-			return
-		}
-		if !started {
-			if err := s.injector.Press(ctx, gesture); err != nil {
-				writeError(w, http.StatusInternalServerError, "input_injection_retry", err)
-				return
-			}
-		}
+		// Native keys can change focus or activate controls before the listener
+		// records commandStarted. A delayed callback does not prove lost input:
+		// replaying F6, Tab or Enter can undo focus or duplicate a side effect.
+		// Wait for this delivery's lifecycle until the bounded action deadline.
 	}
 	observed, _, settled, err := s.store.WaitFor(ctx, before, session.ID, func(event events.Event) bool {
 		return event.Kind == events.KindCommandSettled && event.CausalCommand == command.ID
