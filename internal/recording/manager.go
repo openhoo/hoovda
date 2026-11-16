@@ -3,6 +3,7 @@ package recording
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -21,6 +22,16 @@ import (
 // ErrCaptureFailed marks capture failures that cannot be repaired by retrying
 // artifact export. The stopped video process cannot resume its recording.
 var ErrCaptureFailed = errors.New("recording capture cannot be finalized")
+
+// A session contains many independently bounded synthesis results. Keep its
+// finite export budget separate from the untrusted single-WAV decoder budget.
+// Export streams these stored segments instead of allocating another full PCM
+// timeline and WAV buffer. Silence has its own, smaller cumulative budget.
+const (
+	maxSessionPCMBytes      = 256 << 20
+	maxTimelineSilenceBytes = synth.MaxPCMBytes
+	recordingIOChunkBytes   = 32 << 10
+)
 
 type Config struct {
 	Root      string
@@ -153,8 +164,8 @@ func (m *Manager) AddAudio(sessionID string, monotonicNS int64, audio synth.Audi
 		s.audioErr = err
 		return
 	}
-	if len(audio.PCM) > synth.MaxPCMBytes-s.audioBytes {
-		s.audioErr = errors.New("recorded PCM exceeds WAV limit")
+	if len(audio.PCM) > maxSessionPCMBytes-s.audioBytes {
+		s.audioErr = fmt.Errorf("recorded PCM exceeds session limit (%d + %d > %d bytes)", s.audioBytes, len(audio.PCM), maxSessionPCMBytes)
 		return
 	}
 	audio.PCM = append([]byte(nil), audio.PCM...)
@@ -200,8 +211,8 @@ func (m *Manager) audioTimeline(id string, seal bool) ([]AudioTimelineEntry, err
 	}
 	segments := append([]Segment(nil), s.segments...)
 	s.mu.Unlock()
-	_, timeline, err := renderTimelineWithIndex(segments)
-	return timeline, err
+	plan, err := planAudioTimeline(segments)
+	return plan.timeline, err
 }
 
 func (m *Manager) WriteJSON(sessionID, name string, value []byte) (Artifact, error) {
@@ -272,20 +283,12 @@ func (m *Manager) Finish(ctx context.Context, id string) ([]Artifact, error) {
 	if audioErr != nil {
 		return nil, audioErr
 	}
-	audio, err := renderTimeline(segments)
-	if err != nil {
-		return nil, err
-	}
-	wav, err := synth.EncodeWAV(audio)
-	if err != nil {
-		return nil, err
-	}
 	wavPath := filepath.Join(s.dir, "screenreader.wav")
-	if err := os.WriteFile(wavPath, wav, 0o600); err != nil {
+	if err := writeTimelineWAV(ctx, wavPath, segments); err != nil {
 		return nil, err
 	}
 	artifacts := extras
-	item, err := inventory("screenreader-audio", wavPath, "audio/wav")
+	item, err := inventoryContext(ctx, "screenreader-audio", wavPath, "audio/wav")
 	if err != nil {
 		return nil, err
 	}
@@ -301,11 +304,14 @@ func (m *Manager) Finish(ctx context.Context, id string) ([]Artifact, error) {
 		if err := errors.Join(cmd.Run(), ctx.Err(), output.Err); err != nil {
 			return nil, fmt.Errorf("mux screenreader video: %w: %s", err, output.String())
 		}
-		item, err := inventory("screenreader-video", videoPath, "video/webm")
+		item, err := inventoryContext(ctx, "screenreader-video", videoPath, "video/webm")
 		if err != nil {
 			return nil, err
 		}
 		artifacts = append(artifacts, item)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	m.mu.Lock()
 	if m.sessions[id] == s {
@@ -375,69 +381,216 @@ func renderTimeline(segments []Segment) (synth.Audio, error) {
 }
 
 func renderTimelineWithIndex(segments []Segment) (synth.Audio, []AudioTimelineEntry, error) {
-	var timeline []AudioTimelineEntry
+	plan, err := planAudioTimeline(segments)
+	if err != nil {
+		return synth.Audio{}, nil, err
+	}
+	result := synth.Audio{SampleRate: plan.sampleRate, Channels: 1, BitsPerSample: 16, PCM: make([]byte, plan.pcmBytes)}
+	for _, segment := range plan.segments {
+		copy(result.PCM[segment.offsetBytes:], segment.audio.PCM)
+	}
+	result.Duration = time.Duration(int64(len(result.PCM)) * int64(time.Second) / int64(result.SampleRate*2))
+	return result, plan.timeline, nil
+}
+
+type plannedAudioSegment struct {
+	offsetBytes int
+	audio       synth.Audio
+}
+
+type audioTimelinePlan struct {
+	sampleRate int
+	pcmBytes   int
+	segments   []plannedAudioSegment
+	timeline   []AudioTimelineEntry
+}
+
+// Planning the exact index must not allocate a PCM copy. Finish uses the same
+// layout to stream every original frame and the bounded intervening silence.
+func planAudioTimeline(segments []Segment) (audioTimelinePlan, error) {
 	const defaultRate = 22_050
 	segments = append([]Segment(nil), segments...)
 	sort.SliceStable(segments, func(i, j int) bool { return segments[i].Offset < segments[j].Offset })
-	result := synth.Audio{SampleRate: defaultRate, Channels: 1, BitsPerSample: 16}
+	plan := audioTimelinePlan{sampleRate: defaultRate}
+	silenceBytes := 0
 	for _, segment := range segments {
 		if err := segment.Audio.Validate(); err != nil {
-			return synth.Audio{}, nil, err
+			return audioTimelinePlan{}, err
 		}
 		if segment.Audio.Channels != 1 || segment.Audio.BitsPerSample != 16 {
-			return synth.Audio{}, nil, errors.New("audio timeline requires mono signed 16-bit PCM")
+			return audioTimelinePlan{}, errors.New("audio timeline requires mono signed 16-bit PCM")
 		}
-		if len(result.PCM) == 0 {
-			result.SampleRate = segment.Audio.SampleRate
+		if plan.pcmBytes == 0 {
+			plan.sampleRate = segment.Audio.SampleRate
 		}
-		if segment.Audio.SampleRate != result.SampleRate {
-			return synth.Audio{}, nil, errors.New("audio timeline sample rates differ")
+		if segment.Audio.SampleRate != plan.sampleRate {
+			return audioTimelinePlan{}, errors.New("audio timeline sample rates differ")
 		}
 		if segment.Offset < 0 {
-			return synth.Audio{}, nil, errors.New("audio timeline offset is negative")
+			return audioTimelinePlan{}, errors.New("audio timeline offset is negative")
 		}
-		// Reject oversized gaps before allocation. Split seconds and fractional
-		// seconds to preserve nearest-sample rounding without float precision or
-		// overflowing offset*sampleRate for hostile timestamps.
+		// Reject oversized timestamps before arithmetic or allocation. Split
+		// seconds and fractional seconds to preserve nearest-sample rounding
+		// without float precision or overflowing offset*sampleRate for hostile
+		// timestamps.
 		seconds := int64(segment.Offset / time.Second)
-		rate := int64(result.SampleRate)
-		if seconds > int64(synth.MaxPCMBytes/2)/rate {
-			return synth.Audio{}, nil, errors.New("audio timeline exceeds WAV limit")
+		rate := int64(plan.sampleRate)
+		if seconds > int64(maxSessionPCMBytes/2)/rate {
+			return audioTimelinePlan{}, errors.New("audio timeline exceeds session PCM limit")
 		}
 		fraction := int64(segment.Offset % time.Second)
 		offsetSamples := seconds*rate + (fraction*rate+int64(time.Second)/2)/int64(time.Second)
+		if offsetSamples > int64(maxSessionPCMBytes/2) {
+			return audioTimelinePlan{}, errors.New("audio timeline exceeds session PCM limit")
+		}
 		offsetBytes := int(offsetSamples * 2)
-		if offsetBytes < len(result.PCM) {
-			offsetBytes = len(result.PCM)
+		if offsetBytes < plan.pcmBytes {
+			offsetBytes = plan.pcmBytes
 		}
-		if offsetBytes > synth.MaxPCMBytes-len(segment.Audio.PCM) {
-			return synth.Audio{}, nil, errors.New("audio timeline exceeds WAV limit")
+		gapBytes := offsetBytes - plan.pcmBytes
+		if gapBytes > maxTimelineSilenceBytes-silenceBytes {
+			return audioTimelinePlan{}, errors.New("audio timeline silence exceeds limit")
 		}
-		if offsetBytes > len(result.PCM) {
-			result.PCM = append(result.PCM, make([]byte, offsetBytes-len(result.PCM))...)
+		if offsetBytes > maxSessionPCMBytes-len(segment.Audio.PCM) {
+			return audioTimelinePlan{}, errors.New("audio timeline exceeds session PCM limit")
 		}
-		timeline = append(timeline, AudioTimelineEntry{MonotonicNS: segment.MonotonicNS, StartSample: int64(offsetBytes / 2), SampleCount: int64(len(segment.Audio.PCM) / 2), SampleRate: result.SampleRate})
-		result.PCM = append(result.PCM, segment.Audio.PCM...)
+		silenceBytes += gapBytes
+		plan.timeline = append(plan.timeline, AudioTimelineEntry{MonotonicNS: segment.MonotonicNS, StartSample: int64(offsetBytes / 2), SampleCount: int64(len(segment.Audio.PCM) / 2), SampleRate: plan.sampleRate})
+		plan.segments = append(plan.segments, plannedAudioSegment{offsetBytes: offsetBytes, audio: segment.Audio})
+		plan.pcmBytes = offsetBytes + len(segment.Audio.PCM)
 	}
-	if len(result.PCM) == 0 {
-		result.PCM = make([]byte, result.SampleRate/10*2)
+	if plan.pcmBytes == 0 {
+		plan.pcmBytes = plan.sampleRate / 10 * 2
 	}
-	result.Duration = time.Duration(int64(len(result.PCM)) * int64(time.Second) / int64(result.SampleRate*2))
-	return result, timeline, nil
+	return plan, nil
+}
+
+func writeTimelineWAV(ctx context.Context, path string, segments []Segment) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	plan, err := planAudioTimeline(segments)
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".screenreader-wav-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if err := streamTimelineWAV(ctx, file, plan); err != nil {
+		return errors.Join(err, file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
+}
+
+func streamTimelineWAV(ctx context.Context, output io.Writer, plan audioTimelinePlan) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Both limits are explicit: finite session resources and representable RIFF
+	// sizes. The header addition cannot wrap even if the resource limit changes.
+	if plan.pcmBytes < 0 || plan.pcmBytes > maxSessionPCMBytes || uint64(plan.pcmBytes) > uint64(^uint32(0))-36 {
+		return errors.New("recording WAV exceeds container limit")
+	}
+	var header [44]byte
+	copy(header[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(header[4:8], uint32(plan.pcmBytes)+36)
+	copy(header[8:16], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(header[16:20], 16)
+	binary.LittleEndian.PutUint16(header[20:22], 1)
+	binary.LittleEndian.PutUint16(header[22:24], 1)
+	binary.LittleEndian.PutUint32(header[24:28], uint32(plan.sampleRate))
+	binary.LittleEndian.PutUint32(header[28:32], uint32(plan.sampleRate*2))
+	binary.LittleEndian.PutUint16(header[32:34], 2)
+	binary.LittleEndian.PutUint16(header[34:36], 16)
+	copy(header[36:40], "data")
+	binary.LittleEndian.PutUint32(header[40:44], uint32(plan.pcmBytes))
+	if err := writeRecordingBytes(ctx, output, header[:]); err != nil {
+		return err
+	}
+	var silence [recordingIOChunkBytes]byte
+	position := 0
+	writeSilence := func(count int) error {
+		for count > 0 {
+			size := min(count, len(silence))
+			if err := writeRecordingBytes(ctx, output, silence[:size]); err != nil {
+				return err
+			}
+			count -= size
+		}
+		return nil
+	}
+	for _, segment := range plan.segments {
+		if err := writeSilence(segment.offsetBytes - position); err != nil {
+			return err
+		}
+		if err := writeRecordingBytes(ctx, output, segment.audio.PCM); err != nil {
+			return err
+		}
+		position = segment.offsetBytes + len(segment.audio.PCM)
+	}
+	return writeSilence(plan.pcmBytes - position)
+}
+
+func writeRecordingBytes(ctx context.Context, output io.Writer, value []byte) error {
+	for len(value) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		size := min(len(value), recordingIOChunkBytes)
+		written, err := output.Write(value[:size])
+		if err != nil {
+			return err
+		}
+		if written != size {
+			return io.ErrShortWrite
+		}
+		value = value[written:]
+	}
+	return ctx.Err()
 }
 
 func inventory(name, path, contentType string) (Artifact, error) {
+	return inventoryContext(context.Background(), name, path, contentType)
+}
+
+func inventoryContext(ctx context.Context, name, path, contentType string) (Artifact, error) {
+	if err := ctx.Err(); err != nil {
+		return Artifact{}, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return Artifact{}, err
 	}
 	defer file.Close()
 	digest := sha256.New()
-	bytes, err := io.Copy(digest, file)
+	bytes, err := io.Copy(digest, recordingContextReader{ctx: ctx, input: file})
 	if err != nil {
 		return Artifact{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Artifact{}, err
+	}
 	return Artifact{Name: name, Path: path, ContentType: contentType, Bytes: bytes, SHA256: hex.EncodeToString(digest.Sum(nil))}, nil
+}
+
+type recordingContextReader struct {
+	ctx   context.Context
+	input io.Reader
+}
+
+func (r recordingContextReader) Read(value []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.input.Read(value[:min(len(value), recordingIOChunkBytes)])
 }
 
 func (m *Manager) ResolveArtifact(sessionID, name string) (string, error) {

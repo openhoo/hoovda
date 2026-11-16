@@ -98,18 +98,13 @@ func (i engineInjector) Press(ctx context.Context, gesture string) error {
 	return err
 }
 
-type dropFirstInjector struct {
-	engine *engine.Engine
-	calls  int
+type unobservedInjector struct {
+	calls int
 }
 
-func (i *dropFirstInjector) Press(ctx context.Context, gesture string) error {
+func (i *unobservedInjector) Press(context.Context, string) error {
 	i.calls++
-	if i.calls == 1 {
-		return nil
-	}
-	_, err := i.engine.HandleGesture(ctx, gesture)
-	return err
+	return nil
 }
 
 type failedCommandInjector struct {
@@ -503,17 +498,18 @@ func TestActionReturnsGatewayTimeoutWhenCommandSettlesWithFailure(t *testing.T) 
 	}
 }
 
-func TestPhysicalActionRetriesOnceWhenKeyWasNotObserved(t *testing.T) {
+func TestPhysicalActionTimesOutWithoutReplayingUnobservedKey(t *testing.T) {
 	server := testServer(t)
-	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "key-retry"}, "test-secret")
+	server.cfg.ActionTimeout = 50 * time.Millisecond
+	created := request(t, server, http.MethodPost, "/v2/sessions", CreateSessionRequest{TestID: "unobserved-key"}, "test-secret")
 	var session Session
 	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
 		t.Fatal(err)
 	}
-	injector := &dropFirstInjector{engine: server.engine}
+	injector := &unobservedInjector{}
 	server.injector = injector
 	action := request(t, server, http.MethodPost, "/v2/sessions/"+session.ID+"/actions", ActionRequest{Command: "escape"}, "test-secret")
-	if action.Code != http.StatusOK || injector.calls != 2 {
+	if action.Code != http.StatusGatewayTimeout || injector.calls != 1 || !bytes.Contains(action.Body.Bytes(), []byte(`"code":"command_not_observed"`)) {
 		t.Fatalf("action status=%d calls=%d body=%s", action.Code, injector.calls, action.Body.String())
 	}
 }
