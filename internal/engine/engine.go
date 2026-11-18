@@ -3642,7 +3642,19 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	if isDocument {
 		e.graphDirty = true
 	}
-	preserveDocumentPosition := isDocument && e.graph.InDocument(e.cursor.Object, id)
+	preserveDocumentPosition := false
+	if isDocument {
+		document := id
+		// Chromium can focus a frame document and then its outer document while
+		// loading the frame. Keep a browse position elsewhere on the same page.
+		// A cursor on the embedding object can still enter the frame itself.
+		if oldMode == "browse" && e.cursor.Object != node.Parent {
+			if root, ok := e.graph.DocumentRoot(id); ok {
+				document = root
+			}
+		}
+		preserveDocumentPosition = e.graph.InDocument(e.cursor.Object, document)
+	}
 	if e.webContentFocused && !preserveDocumentPosition && (isDocument || e.cursor.Mode == "focus" || node.HasState("focusable")) {
 		e.cursor.Object, e.cursor.Offset = id, 0
 	}
