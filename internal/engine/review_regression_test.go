@@ -114,6 +114,68 @@ func TestLateSameDocumentFocusPreservesTableBrowsePosition(t *testing.T) {
 	}
 }
 
+// Chromium can report both the nested and top-level document as focused while
+// an iframe is loading. A focus event on a control is a separate transition.
+func TestFrameDocumentFocusPreservesBrowseNavigationToTable(t *testing.T) {
+	id := func(path string) model.ObjectID { return model.ObjectID{Bus: "app", Path: path} }
+	doc, link, table := id("/doc"), id("/start"), id("/table")
+	a, b := id("/a"), id("/b")
+	frame, nested, button := id("/frame"), id("/nested"), id("/button")
+	graph, err := model.NewGraph(doc, map[model.ObjectID]*model.Node{
+		doc:    {ID: doc, Role: "document web", States: map[string]bool{"focused": true}, Children: []model.ObjectID{link, table, frame}},
+		link:   {ID: link, Parent: doc, Role: "link", Name: "Start"},
+		table:  {ID: table, Parent: doc, Role: "table", Name: "Contacts", RowCount: 1, ColumnCount: 2, Children: []model.ObjectID{a, b}},
+		a:      {ID: a, Parent: table, Role: "table cell", Name: "Name", Table: table, Row: 1, Column: 1},
+		b:      {ID: b, Parent: table, Role: "table cell", Name: "Address", Table: table, Row: 1, Column: 2},
+		frame:  {ID: frame, Parent: doc, Role: "internal frame", Name: "Contact frame", Children: []model.ObjectID{nested}},
+		nested: {ID: nested, Parent: frame, Role: "document web", States: map[string]bool{"focused": true}, Children: []model.ObjectID{button}},
+		button: {ID: button, Parent: nested, Role: "push button", Name: "Frame action", States: map[string]bool{"focusable": true}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := engineForGraph(t, graph)
+	ctx := context.Background()
+	focus := func(target model.ObjectID) {
+		e.handleNativeEvent(ctx, NativeEvent{Name: "org.a11y.atspi.Event.Focus", Source: target})
+	}
+	act := func(action string) {
+		t.Helper()
+		if err := e.ExecuteDirect(ctx, action); err != nil {
+			t.Fatal(err)
+		}
+	}
+	focus(doc)
+	act("documentStart")
+	if got := e.State().Cursor.Object; got != link {
+		t.Fatalf("documentStart reached %v, want %v", got, link)
+	}
+	focus(nested)
+	if got := e.State().Focus; got != nested {
+		t.Fatalf("native focus = %v, want %v", got, nested)
+	}
+	focus(doc)
+	act("nextTable")
+	act("nextTableColumn")
+	if got := e.State().Cursor.Object; got != b {
+		t.Fatalf("table navigation reached %v, want %v", got, b)
+	}
+	focus(button)
+	if state := e.State(); state.Focus != button || state.Cursor.Object != button {
+		t.Fatalf("focused frame control was not tracked: focus=%v cursor=%v", state.Focus, state.Cursor)
+	}
+	focus(doc)
+	act("documentStart")
+	act("nextFrame")
+	if got := e.State().Cursor.Object; got != frame {
+		t.Fatalf("frame navigation reached %v, want %v", got, frame)
+	}
+	focus(nested)
+	if got := e.State().Cursor.Object; got != nested {
+		t.Fatalf("entering the selected frame left the cursor on %v", got)
+	}
+}
+
 func TestFindPreviousDoesNotRepeatNormalizedCurrentTextOccurrence(t *testing.T) {
 	root := model.ObjectID{Bus: "app", Path: "/root"}
 	item := model.ObjectID{Bus: "app", Path: "/item"}
