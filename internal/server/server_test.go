@@ -84,7 +84,8 @@ func (f *fakeAccess) DoDefaultAction(ctx context.Context, id model.ObjectID) err
 	}
 	return nil
 }
-func (f *fakeAccess) GrabFocus(context.Context, model.ObjectID) error { return nil }
+func (f *fakeAccess) GrabFocus(context.Context, model.ObjectID) error           { return nil }
+func (f *fakeAccess) SetCaretOffset(context.Context, model.ObjectID, int) error { return nil }
 func (f *fakeAccess) SetTextSelection(context.Context, model.ObjectID, int, int) error {
 	return nil
 }

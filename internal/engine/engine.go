@@ -24,6 +24,7 @@ type Accessibility interface {
 	ReadNode(context.Context, model.ObjectID) (*model.Node, error)
 	DoDefaultAction(context.Context, model.ObjectID) error
 	GrabFocus(context.Context, model.ObjectID) error
+	SetCaretOffset(context.Context, model.ObjectID, int) error
 	SetTextSelection(context.Context, model.ObjectID, int, int) error
 	GenerateMouseEvent(context.Context, int, int, string) error
 	Events() <-chan NativeEvent
@@ -766,7 +767,11 @@ func (e *Engine) execute(ctx context.Context, command profile.Command, argument 
 	case "speechControl":
 		err = e.speechControl(command)
 	case "brailleControl":
-		err = e.brailleControl(command, argument)
+		if command.ID == "braillePreviousLine" || command.ID == "brailleNextLine" {
+			err = e.moveBrailleLine(ctx, command)
+		} else {
+			err = e.brailleControl(command, argument)
+		}
 	case "focus":
 		consume = false
 	}
@@ -1125,13 +1130,28 @@ func moveDocumentLine(graph *model.Graph, current model.ObjectID, direction int)
 	currentGroup := -1
 	for index, group := range groups {
 		for _, node := range group {
-			if node.ID == current || isDescendantOf(graph, current, node.ID) || isDescendantOf(graph, node.ID, current) {
+			if node.ID == current {
 				currentGroup = index
 				break
 			}
 		}
 		if currentGroup >= 0 {
 			break
+		}
+	}
+	// A named container can have a line of its own before its children's
+	// lines. Only use ancestry when the source has no exact line.
+	if currentGroup < 0 {
+		for index, group := range groups {
+			for _, node := range group {
+				if isDescendantOf(graph, current, node.ID) || isDescendantOf(graph, node.ID, current) {
+					currentGroup = index
+					break
+				}
+			}
+			if currentGroup >= 0 {
+				break
+			}
 		}
 	}
 	if currentGroup < 0 {
@@ -1905,22 +1925,6 @@ func (e *Engine) brailleControl(command profile.Command, argument string) error 
 		fragment := string(full[start:end])
 		e.mu.Unlock()
 		e.emit(profile.Presentation{Braille: fragment}, node, command.ID, "braillePan", "normal")
-		return nil
-	case "braillePreviousLine", "brailleNextLine":
-		text := navigableText(node)
-		value, _, err := moveReviewRange(node.ID, text, e.review.Offset, command.Direction, model.TextUnitLine, e.presenter)
-		if err != nil {
-			e.mu.Unlock()
-			return err
-		}
-		e.review.Object, e.review.Offset = node.ID, value.Start
-		e.brailleOffset = 0
-		e.mu.Unlock()
-		fragment, err := value.Text(text)
-		if err != nil {
-			return err
-		}
-		e.emit(profile.Presentation{Braille: fragment}, node, command.ID, "brailleLine", "normal")
 		return nil
 	case "brailleRoute", "brailleReportFormatting":
 		cell := 0
@@ -2912,10 +2916,23 @@ func (e *Engine) handleNativeEvent(ctx context.Context, native NativeEvent) {
 		return
 	}
 	if strings.Contains(native.Name, ".Document.") {
+		// A background iframe can finish loading after focus has already
+		// moved into an editor. Its load invalidates the graph, but cannot
+		// replace an object that still has native focus.
+		e.mu.RLock()
+		prior := e.focus
+		e.mu.RUnlock()
+		stillFocused := false
+		if prior.Valid() && prior != native.Source {
+			current, err := e.access.ReadNode(ctx, prior)
+			stillFocused = err == nil && current != nil && current.ID == prior && current.HasState("focused")
+		}
 		e.mu.Lock()
-		e.focus = native.Source
-		e.browserWindowActive = true
-		e.webContentFocused = true
+		if !stillFocused {
+			e.focus = native.Source
+			e.browserWindowActive = true
+			e.webContentFocused = true
+		}
 		e.graphDirty = true
 		e.focusContextVersion++
 		e.mu.Unlock()

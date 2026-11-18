@@ -760,6 +760,20 @@ func (c *Client) GrabFocus(ctx context.Context, id model.ObjectID) error {
 	return nil
 }
 
+func (c *Client) SetCaretOffset(ctx context.Context, id model.ObjectID, offset int) error {
+	if offset < 0 || int(int32(offset)) != offset || !id.Valid() {
+		return errors.New("invalid text caret position")
+	}
+	var moved bool
+	if err := c.conn.Object(id.Bus, dbus.ObjectPath(id.Path)).CallWithContext(ctx, InterfaceText+".SetCaretOffset", 0, int32(offset)).Store(&moved); err != nil {
+		return err
+	}
+	if !moved {
+		return errors.New("accessible text caret did not move")
+	}
+	return nil
+}
+
 func (c *Client) SetTextSelection(ctx context.Context, id model.ObjectID, start, end int) error {
 	if start < 0 || end <= start {
 		return fmt.Errorf("invalid text selection %d..%d", start, end)

@@ -10,6 +10,14 @@ Access. The immutable `nvda-web-2026.1.1` profile is a behavior-compatibility
 target backed by pinned public system-test assertions, not an NVDA binary,
 source port, or fork.
 
+Braille previous/next line follows the text caret in a focused editor. When
+Chromium exposes a separate accessible block for each line, the editor's
+embedded-object offset identifies the block; offsets within its text refer
+to that child. A successful move updates the native caret before presenting
+the target line. In review mode, moving the braille cursor leaves the editor's
+caret in place. A background document finishing its load does not supersede
+an object that still has native focus.
+
 ## Locked-profile release gate
 
 `hoovda conformance` now passes the seven-case declared corpus. Reference

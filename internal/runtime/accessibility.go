@@ -42,6 +42,10 @@ func (a *Accessibility) SetTextSelection(ctx context.Context, id model.ObjectID,
 	return a.client.SetTextSelection(ctx, id, start, end)
 }
 
+func (a *Accessibility) SetCaretOffset(ctx context.Context, id model.ObjectID, offset int) error {
+	return a.client.SetCaretOffset(ctx, id, offset)
+}
+
 func (a *Accessibility) GenerateMouseEvent(ctx context.Context, x, y int, name string) error {
 	return a.client.GenerateMouseEvent(ctx, x, y, name)
 }
