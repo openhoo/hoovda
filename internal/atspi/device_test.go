@@ -168,6 +168,23 @@ func TestListenerGrabsAreSpecificAndCoverLayouts(t *testing.T) {
 	}
 }
 
+func TestLaptopPlainCommandsRemainGrabbedWithAmbientCapsLock(t *testing.T) {
+	const lock = uint32(1 << 1)
+	grabs := listenerGrabs("laptop")
+	for _, k := range []struct {
+		mask uint32
+		sym  int32
+	}{
+		{lock, 0xffc3},               // ordinary F6
+		{lock, 'H'}, {lock | 1, 'h'}, // Caps and Shift+Caps have opposite case
+		{lock | 4, 0xff50}, // Ctrl+Home with a lit LED, no virtual key held
+	} {
+		if !hasGrab(grabs, k.mask, k.sym) {
+			t.Errorf("missing laptop key %#x under mask %#x", k.sym, k.mask)
+		}
+	}
+}
+
 func TestShiftedNumberNormalizesToGestureKey(t *testing.T) {
 	for _, item := range []struct {
 		value string

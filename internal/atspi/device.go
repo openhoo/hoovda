@@ -163,26 +163,25 @@ func listenerGrabs(layout string) []listenerGrab {
 				// to one canonical command gesture.
 				add(mask, key, false)
 			}
+			if layout == "laptop" {
+				// A lit Caps Lock LED is ambient state, not a held NVDA key.
+				// The laptop injector leaves it alone. Match the command in
+				// that state too, including the opposite XKB case for letters.
+				locked := mask | shiftLockMask
+				add(locked, key, mask&1 != 0)
+				if mask&1 != 0 {
+					add(locked, key, false)
+				}
+				if len(key) == 1 && key[0] >= 'a' && key[0] <= 'z' {
+					add(locked, key, mask&1 == 0)
+				}
+			}
 			if virtualModifier != "" {
 				add(0, virtualModifier, false)
 				if virtualModifier == "capslock" {
-					// Some X servers apply LockMask before the grabbed press is
-					// replayed. Register both states so Caps Lock always behaves as
-					// HooVDA's virtual modifier, never as an ambient lock toggle.
 					add(shiftLockMask, virtualModifier, false)
-					add(mask|shiftLockMask, key, mask&1 != 0)
-					if mask&1 != 0 {
-						// Caps Lock and Shift cancel each other for letters. The
-						// resulting event therefore carries LockMask|ShiftMask but
-						// the base lowercase keysym.
-						add(mask|shiftLockMask, key, false)
-					}
-					// XKB can resolve a letter to its uppercase keysym while the
-					// physical Caps Lock key remains down, even when the preemptive
-					// AT-SPI listener consumed the Caps Lock press and therefore
-					// reports no LockMask on the command key. Register both XKB
-					// levels under both possible masks; normalizeEventKey folds the
-					// delivered event string back to the command's lowercase key.
+					// A grabbed Caps press can change the keysym level even
+					// when AT-SPI reports no LockMask on the following key.
 					add(mask, key, true)
 					add(mask|shiftLockMask, key, true)
 				}

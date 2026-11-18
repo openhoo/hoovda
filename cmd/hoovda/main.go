@@ -109,7 +109,7 @@ func serve(args []string) error {
 		Token: cfg.ControlToken, Profile: cfg.Profile, Locale: cfg.Locale,
 		KeyboardLayout: cfg.KeyboardLayout, ActionTimeout: cfg.ActionTimeout, FinishTimeout: finishTimeout,
 		QuietWindow: cfg.QuiescenceWindow,
-	}, screenreader, store, &input.XDoTool{Command: cfg.XDoToolCommand}, recorder, logger)
+	}, screenreader, store, &input.XDoTool{Command: cfg.XDoToolCommand, KeyboardLayout: cfg.KeyboardLayout}, recorder, logger)
 	if err != nil {
 		return err
 	}

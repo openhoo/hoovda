@@ -18,8 +18,9 @@ type Injector interface {
 }
 
 type XDoTool struct {
-	Command string
-	mu      sync.Mutex
+	Command        string
+	KeyboardLayout string
+	mu             sync.Mutex
 }
 
 func (x *XDoTool) Press(ctx context.Context, gesture string) error {
@@ -73,6 +74,13 @@ func (x *XDoTool) Press(ctx context.Context, gesture string) error {
 			return keyErr
 		}
 		return releaseErr
+	}
+	// On the laptop layout Caps Lock is the NVDA modifier. Clearing an
+	// ambient Caps Lock in xdotool sends a real Caps_Lock key down/up. The
+	// AT-SPI grab can omit that release and turn Ctrl+Home into a different,
+	// valid command (reviewTopLine). Deliver only the requested chord.
+	if x.KeyboardLayout == "laptop" {
+		return run(ctx, command, "key", gesture)
 	}
 	return run(ctx, command, "key", "--clearmodifiers", gesture)
 }
