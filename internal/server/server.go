@@ -370,7 +370,7 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		_ = s.engine.ExecuteDirect(ctx, command.ID)
 	} else {
 		gesture = gestures[0]
-		if err := s.engine.PreparePhysicalCommand(ctx, command.ID); err != nil {
+		if err := s.engine.PreparePhysicalCommand(ctx, command.ID, gesture); err != nil {
 			writeError(w, http.StatusServiceUnavailable, "command_preparation", err)
 			return
 		}

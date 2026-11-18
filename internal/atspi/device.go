@@ -45,12 +45,13 @@ type DeviceListener struct {
 	layout       string
 	handler      GestureHandler
 	consumer     GestureConsumer
+	expected     func(string) bool
 	jobs         chan deviceJob
 	pending      map[string]pendingKey
 }
 
-func (c *Client) RegisterDeviceListener(ctx context.Context, layout string, handler GestureHandler, consumer GestureConsumer) (*DeviceListener, error) {
-	listener := &DeviceListener{layout: layout, handler: handler, consumer: consumer, jobs: make(chan deviceJob, 256), pending: make(map[string]pendingKey)}
+func (c *Client) RegisterDeviceListener(ctx context.Context, layout string, handler GestureHandler, consumer GestureConsumer, expected func(string) bool) (*DeviceListener, error) {
+	listener := &DeviceListener{layout: layout, handler: handler, consumer: consumer, expected: expected, jobs: make(chan deviceJob, 256), pending: make(map[string]pendingKey)}
 	go listener.run(ctx)
 	if err := c.conn.Export(listener, ListenerPath, InterfaceDeviceListener); err != nil {
 		return nil, fmt.Errorf("export device listener: %w", err)
@@ -303,7 +304,9 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 	if event.Modifiers&1 != 0 {
 		modifiers = append(modifiers, "shift")
 	}
-	if l.heldModifier != "" {
+	physical := profile.NormalizeGesture(strings.Join(append(modifiers, key), "+"))
+	hadVirtual := l.heldModifier != ""
+	if hadVirtual {
 		modifiers = append(modifiers, l.heldModifier)
 		// Treat the NVDA modifier as one-shot for the command chord. Some X11
 		// AT-SPI stacks omit the modifier release notification after a
@@ -316,6 +319,16 @@ func (l *DeviceListener) NotifyEvent(event DeviceEvent) (bool, *dbus.Error) {
 	}
 	gesture = profile.NormalizeGesture(gesture)
 	command, ok := profile.CommandByGesture(gesture, l.layout)
+	// X11 can restore Caps Lock after an injected laptop chord without
+	// delivering its matching release. An unsupported CapsLock+F6 then
+	// hides the real F6 that the controller sent exactly once. Only discard
+	// the stale virtual modifier if the actual key and physical modifiers
+	// match this managed delivery. Unsolicited and recognized chords keep
+	// their normal meaning.
+	if !ok && hadVirtual && l.expected != nil && l.expected(physical) {
+		gesture = physical
+		command, ok = profile.CommandByGesture(gesture, l.layout)
+	}
 	if !ok {
 		return false, nil
 	}
