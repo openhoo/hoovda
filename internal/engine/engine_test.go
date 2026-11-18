@@ -64,6 +64,15 @@ func (f *fakeAccess) SetTextSelection(_ context.Context, id model.ObjectID, star
 	}
 	return nil
 }
+func (f *fakeAccess) SetCaretOffset(_ context.Context, id model.ObjectID, offset int) error {
+	if f.selectionErr != nil {
+		return f.selectionErr
+	}
+	if node := f.graph.Nodes[id]; node != nil {
+		node.CaretOffset = offset
+	}
+	return nil
+}
 func (f *fakeAccess) GenerateMouseEvent(_ context.Context, x, y int, name string) error {
 	f.mouse = append(f.mouse, fmt.Sprintf("%s:%d:%d", name, x, y))
 	return nil
