@@ -20,6 +20,11 @@ jobs:
       - run: go generate ./internal/atspi
       - run: git diff --exit-code -- internal/atspi/zz_generated_interfaces.go
       - run: go test -race ./...
+      - name: Exercise laptop key delivery on a private X11 display
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb xauth xdotool x11-xserver-utils
+          xvfb-run -a -s '-screen 0 640x480x24 -noreset' env HOOVDA_TEST_PRIVATE_XVFB=1 go test -count=1 ./internal/input -run '^TestLaptopCtrlHomePreservesCapsLock$'
       - run: go vet ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - run: go build ./cmd/hoovda
