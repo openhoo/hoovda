@@ -415,3 +415,33 @@ func TestDeviceWorkerPropagatesCancellation(t *testing.T) {
 		t.Fatal("native command worker did not start")
 	}
 }
+
+func TestManagedF6CanMatchItsActualPressAfterAStaleVirtualModifier(t *testing.T) {
+	for _, tc := range []struct {
+		name, armed, key, want string
+		mods                   uint32
+	}{
+		{"observed stale Caps Lock", "f6", "F6", "f6", 0},
+		{"no owned delivery", "", "F6", "", 0},
+		{"different owned command", "tab", "F6", "", 0},
+		{"physical Shift cannot disappear", "f6", "F6", "", 1},
+		{"real recognized virtual chord wins", "pageup", "Page_Up", "capslock+pageup", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			l := DeviceListener{layout: "laptop", heldModifier: "capslock",
+				expected: func(gesture string) bool { return tc.armed != "" && gesture == tc.armed },
+				handler:  func(_ context.Context, g string, _ bool) (bool, error) { got = append(got, g); return false, nil },
+			}
+			for _, kind := range []uint32{keyPressedEvent, keyReleasedEvent} {
+				_, err := l.NotifyEvent(DeviceEvent{Type: kind, EventString: tc.key, Modifiers: tc.mods})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.want == "" && len(got) != 0 || tc.want != "" && !slices.Equal(got, []string{tc.want}) {
+				t.Fatalf("got %v, want one %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -149,6 +149,7 @@ type Engine struct {
 	presentationBaseline    profile.PresentationSettings
 	presentationBaselineSet bool
 	activeAction            string
+	expectedPhysicalGesture string
 	recentLiveRegions       map[liveRegionAnnouncement]time.Time
 	liveRegionKnown         map[model.ObjectID]bool
 	atomicLiveRegionOwners  map[model.ObjectID]model.ObjectID
@@ -391,6 +392,7 @@ func (e *Engine) EndSessionContext(ctx context.Context, id string) error {
 		e.activeSession = ""
 		e.outputsSealed = false
 		e.activeAction = ""
+		e.expectedPhysicalGesture = ""
 		e.presentationBaseline = profile.PresentationSettings{}
 		e.presentationBaselineSet = false
 		if restore {
@@ -459,6 +461,7 @@ func (e *Engine) EndAction(sessionID, commandID string) {
 	e.mu.Lock()
 	if e.activeSession == sessionID && e.activeAction == commandID {
 		e.activeAction = ""
+		e.expectedPhysicalGesture = ""
 	}
 	e.mu.Unlock()
 }
@@ -606,18 +609,41 @@ func (e *Engine) HandlePhysicalGesture(ctx context.Context, gesture string, cons
 	if !ok {
 		return false, nil
 	}
+	// An ordinary callback also uses up the delivery. A later unmatched
+	// chord cannot borrow the same managed gesture during output settlement.
+	e.ClaimPhysicalGesture(profile.NormalizeGesture(gesture))
 	return e.execute(ctx, command, "", false, &consumed)
 }
 
-func (e *Engine) PreparePhysicalCommand(ctx context.Context, commandID string) error {
+func (e *Engine) PreparePhysicalCommand(ctx context.Context, commandID, gesture string) error {
 	command, ok := profile.CommandByID(commandID)
 	if !ok {
 		return fmt.Errorf("unsupported command %q", commandID)
 	}
-	if !profile.CommandNeedsGraph(command) {
-		return nil
+	if profile.CommandNeedsGraph(command) {
+		if err := e.refreshIfDirty(ctx); err != nil {
+			return err
+		}
 	}
-	return e.refreshIfDirty(ctx)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.activeAction != commandID || e.activeSession == "" {
+		return errors.New("physical command no longer owns the active action")
+	}
+	e.expectedPhysicalGesture = profile.NormalizeGesture(gesture)
+	return nil
+}
+
+// ClaimPhysicalGesture consumes the exact outstanding controller delivery,
+// never a structured action, an unsolicited key, or a completed session.
+func (e *Engine) ClaimPhysicalGesture(gesture string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if gesture == "" || e.expectedPhysicalGesture != gesture {
+		return false
+	}
+	e.expectedPhysicalGesture = ""
+	return true
 }
 
 // ShouldConsumeGesture answers synchronously without touching AT-SPI. Device

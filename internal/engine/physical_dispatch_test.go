@@ -119,3 +119,23 @@ func TestAutomaticFocusModeStopsApplicationAncestorsAtDocumentBoundary(t *testin
 		}
 	}
 }
+
+func TestExpectedPhysicalGestureBoundToManagedAction(t *testing.T) {
+	e := &Engine{activeSession: "test"}
+	if err := e.BeginAction("test", "returnToPage"); err != nil {
+		t.Fatal(err)
+	}
+	if e.ClaimPhysicalGesture("f6") {
+		t.Fatal("beginning an action does not prove physical delivery")
+	}
+	if err := e.PreparePhysicalCommand(context.Background(), "returnToPage", "F6"); err != nil {
+		t.Fatal(err)
+	}
+	if e.ClaimPhysicalGesture("shift+f6") || !e.ClaimPhysicalGesture("f6") || e.ClaimPhysicalGesture("f6") {
+		t.Fatal("expected only the exact pending gesture")
+	}
+	e.EndAction("test", "returnToPage")
+	if e.ClaimPhysicalGesture("f6") {
+		t.Fatal("new input matched a completed action")
+	}
+}
