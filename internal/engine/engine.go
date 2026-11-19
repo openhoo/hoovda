@@ -122,6 +122,8 @@ type Engine struct {
 	focusContextVersion     uint64
 	graphContextVersion     uint64
 	cursor                  model.Cursor
+	pendingCursorFocus      model.ObjectID
+	pendingFocusFromBrowse  bool
 	navigator               model.ObjectID
 	review                  model.Cursor
 	reviewCopyStart         model.Cursor
@@ -230,6 +232,17 @@ func (e *Engine) Refresh(ctx context.Context) error {
 	if _, ok := graph.Node(e.cursor.Object); !ok {
 		e.cursor.Object = remapCursor(oldGraph, graph, e.cursor.Object)
 		e.cursor.Offset = 0
+	}
+	if id := e.pendingCursorFocus; id.Valid() {
+		switch {
+		case e.focus != id:
+			e.pendingCursorFocus = model.ObjectID{}
+		case graph.Nodes[id] != nil:
+			e.moveCursorToFocusLocked(graph.Nodes[id], e.pendingFocusFromBrowse)
+			e.pendingCursorFocus = model.ObjectID{}
+		default:
+			e.graphDirty = true
+		}
 	}
 	if _, ok := graph.Node(e.navigator); !ok {
 		e.navigator = remapCursor(oldGraph, graph, e.navigator)
@@ -3598,7 +3611,6 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	}
 	e.mu.RLock()
 	known := e.graph != nil && e.graph.Nodes[id] != nil
-	knownWebContent := known && hasDocumentAncestor(e.graph, id)
 	contextStale := e.focusContextVersion != e.graphContextVersion
 	e.mu.RUnlock()
 	if !known || contextStale {
@@ -3616,10 +3628,6 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 			if refreshed, readErr := e.access.ReadNode(ctx, id); readErr == nil {
 				node = refreshed
 			}
-			e.mu.RLock()
-			known = e.graph != nil && e.graph.Nodes[id] != nil
-			knownWebContent = known && hasDocumentAncestor(e.graph, id)
-			e.mu.RUnlock()
 		}
 	}
 	node = e.protectNodeContent(node)
@@ -3627,15 +3635,17 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	node = &nodeCopy
 	isDocument := node.Role == "document web" || node.Role == "document frame"
 	e.mu.Lock()
-	if e.graph != nil {
-		if existing := e.graph.Nodes[id]; existing != nil {
-			if !node.Parent.Valid() {
-				node.Parent = existing.Parent
-			}
-			node.RowHeaderText = append([]string(nil), existing.RowHeaderText...)
-			node.ColumnHeaderText = append([]string(nil), existing.ColumnHeaderText...)
-			node.RelationText = cloneRelationText(existing.RelationText)
+	// Refresh can replace the graph between reading the native object and
+	// taking this lock. Only the installed graph can own a browse cursor.
+	existing, known := e.graph.Node(id)
+	knownWebContent := known && hasDocumentAncestor(e.graph, id)
+	if known {
+		if !node.Parent.Valid() {
+			node.Parent = existing.Parent
 		}
+		node.RowHeaderText = append([]string(nil), existing.RowHeaderText...)
+		node.ColumnHeaderText = append([]string(nil), existing.ColumnHeaderText...)
+		node.RelationText = cloneRelationText(existing.RelationText)
 	}
 	contextChain := focusContextChain(e.graph, node)
 	common := 0
@@ -3685,21 +3695,15 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	if isDocument {
 		e.graphDirty = true
 	}
-	preserveDocumentPosition := false
-	if isDocument {
-		document := id
-		// Chromium can focus a frame document and then its outer document while
-		// loading the frame. Keep a browse position elsewhere on the same page.
-		// A cursor on the embedding object can still enter the frame itself.
-		if oldMode == "browse" && e.cursor.Object != node.Parent {
-			if root, ok := e.graph.DocumentRoot(id); ok {
-				document = root
-			}
+	e.pendingCursorFocus = model.ObjectID{}
+	if e.webContentFocused && (isDocument || e.cursor.Mode == "focus" || node.HasState("focusable")) {
+		if known {
+			e.moveCursorToFocusLocked(node, oldMode == "browse")
+		} else {
+			// A prepared physical key must still have a usable cursor. Record
+			// native focus now and resolve the browse position on refresh.
+			e.pendingCursorFocus, e.pendingFocusFromBrowse = id, oldMode == "browse"
 		}
-		preserveDocumentPosition = e.graph.InDocument(e.cursor.Object, document)
-	}
-	if e.webContentFocused && !preserveDocumentPosition && (isDocument || e.cursor.Mode == "focus" || node.HasState("focusable")) {
-		e.cursor.Object, e.cursor.Offset = id, 0
 	}
 	e.mu.Unlock()
 	e.outputMu.Lock()
@@ -3717,6 +3721,23 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	}
 	e.emitEvidenceLocked(e.presenter.PresentFocus(node, enteredAncestors), node, command, "nativeFocus", "normal", true)
 	return isDocument
+}
+
+func (e *Engine) moveCursorToFocusLocked(node *model.Node, fromBrowse bool) {
+	if node.Role == "document web" || node.Role == "document frame" {
+		document := node.ID
+		// Loading an iframe can focus both documents. Keep the position on
+		// the same page unless the cursor is entering the embedding object.
+		if fromBrowse && e.cursor.Object != node.Parent {
+			if root, ok := e.graph.DocumentRoot(node.ID); ok {
+				document = root
+			}
+		}
+		if e.graph.InDocument(e.cursor.Object, document) {
+			return
+		}
+	}
+	e.cursor.Object, e.cursor.Offset = node.ID, 0
 }
 
 // Keep the presented path independently of the graph: a refresh can remove the
