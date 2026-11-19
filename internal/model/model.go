@@ -107,6 +107,19 @@ func (n Node) protectsDescendantContent() bool {
 	return normalizeRole(n.Role) == "password text" || (n.Redacted && n.Attributes["hidden"] != "true")
 }
 
+// RedactAncestorPath applies the same inherited protection as NewGraph to a
+// single path ordered from root to leaf. Shared graph nodes are not mutated.
+func RedactAncestorPath(path []*Node) {
+	protected := false
+	for i, node := range path {
+		if protected {
+			copy := node.RedactedContentCopy()
+			path[i] = &copy
+		}
+		protected = protected || node.protectsDescendantContent()
+	}
+}
+
 // RedactedContentCopy protects descendants whose accessible names and
 // descriptions can contain the enclosing protected object's raw value.
 func (n Node) RedactedContentCopy() Node {
