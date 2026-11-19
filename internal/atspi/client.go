@@ -441,6 +441,20 @@ func (c *Client) ReadNode(ctx context.Context, id model.ObjectID) (*model.Node, 
 	return c.readNode(ctx, ObjectReference{Bus: id.Bus, Path: dbus.ObjectPath(id.Path)})
 }
 
+// Parent reads one live AT-SPI link without walking the application's other objects.
+func (c *Client) Parent(ctx context.Context, id model.ObjectID) (model.ObjectID, error) {
+	ref := ObjectReference{Bus: id.Bus, Path: dbus.ObjectPath(id.Path)}
+	var parent ObjectReference
+	if !ref.Valid() {
+		return model.ObjectID{}, errors.New("invalid accessible reference")
+	}
+	err := tupleProperty(ctx, c.conn.Object(ref.Bus, ref.Path), InterfaceAccessible+".Parent", &parent)
+	if err != nil || !parent.Valid() {
+		return model.ObjectID{}, err
+	}
+	return parent.Model(), nil
+}
+
 func (c *Client) readNode(ctx context.Context, ref ObjectReference) (*model.Node, error) {
 	return c.readNodeUsingCache(ctx, ref, nil)
 }

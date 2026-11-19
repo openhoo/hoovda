@@ -20,7 +20,9 @@ import (
 type fakeAccess struct {
 	graph        *model.Graph
 	graphAtRead  func(int) *model.Graph
+	graphErr     error
 	readNodes    map[model.ObjectID]*model.Node
+	parents      map[model.ObjectID]model.ObjectID
 	events       chan NativeEvent
 	graphReads   int
 	blockGraphs  bool
@@ -32,6 +34,9 @@ type fakeAccess struct {
 
 func (f *fakeAccess) BrowserGraph(ctx context.Context, _ string, _ model.ObjectID) (*model.Graph, error) {
 	f.graphReads++
+	if f.graphErr != nil {
+		return nil, f.graphErr
+	}
 	if f.blockGraphs {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -46,6 +51,9 @@ func (f *fakeAccess) ReadNode(_ context.Context, id model.ObjectID) (*model.Node
 		return node, nil
 	}
 	return f.graph.Nodes[id], nil
+}
+func (f *fakeAccess) Parent(_ context.Context, id model.ObjectID) (model.ObjectID, error) {
+	return f.parents[id], nil
 }
 func (f *fakeAccess) DoDefaultAction(_ context.Context, id model.ObjectID) error {
 	f.activated = append(f.activated, id)

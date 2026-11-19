@@ -257,6 +257,82 @@ func TestNativeFocusDiscoversNewDialogContextOnRefresh(t *testing.T) {
 	}
 }
 
+func TestNativeFocusKeepsDialogContextWhenFullRefreshTimesOut(t *testing.T) {
+	id := func(path string) model.ObjectID { return model.ObjectID{Bus: "app", Path: path} }
+	doc, dialog, first, next := id("/doc"), id("/dialog"), id("/cancel"), id("/archive")
+	graph, err := model.NewGraph(doc, map[model.ObjectID]*model.Node{
+		doc: {ID: doc, Role: "document web"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Chromium's direct reads do not populate Parent. The live AT-SPI
+	// property is available even when the full tree cannot be refreshed.
+	direct := map[model.ObjectID]*model.Node{
+		dialog: {ID: dialog, Role: "dialog", Name: "Archive notebook?",
+			Description: "You can restore it later.", States: map[string]bool{"enabled": true}},
+		first: {ID: first, Role: "push button", Name: "Cancel",
+			States: map[string]bool{"focusable": true, "enabled": true}, Attributes: map[string]string{"tag": "button"}},
+		next: {ID: next, Role: "push button", Name: "Archive",
+			States: map[string]bool{"focusable": true, "enabled": true}, Attributes: map[string]string{"tag": "button"}},
+	}
+	value, access, store := nativeFocusEngine(t, graph, direct)
+	access.parents = map[model.ObjectID]model.ObjectID{dialog: doc, first: dialog, next: dialog}
+	access.graphErr = context.DeadlineExceeded
+	if got := focusSpeech(nativeFocusOutput(t, value, access, store, first)); got != "Archive notebook?  dialog  You can restore it later.  Cancel  button" {
+		t.Fatalf("first focus after opening the dialog = %q", got)
+	}
+	if got := focusSpeech(nativeFocusOutput(t, value, access, store, next)); got != "Archive  button" {
+		t.Fatalf("focus within the same dialog = %q", got)
+	}
+	if state := value.State(); state.Focus != next || state.Cursor.Object != doc || state.GraphRevision != graph.Revision {
+		t.Fatalf("partial focus path changed the navigation graph: %+v", state)
+	}
+}
+
+func TestNativeFocusChecksRecoveredAncestorPath(t *testing.T) {
+	id := func(path string) model.ObjectID { return model.ObjectID{Bus: "app", Path: path} }
+	doc, ancestor, dialog, button := id("/doc"), id("/ancestor"), id("/dialog"), id("/button")
+	for _, test := range []struct {
+		name    string
+		parent  model.ObjectID
+		protect bool
+		want    string
+	}{
+		{"protected parent", doc, true, "[redacted]"},
+		{"detached protected parent", id("/detached"), true, "[redacted]"},
+		{"cycle", dialog, false, "Choose  button"},
+		{"unattached path", id("/detached"), false, "Choose  button"},
+		{"different application", model.ObjectID{Bus: "other-app", Path: "/doc"}, false, "Choose  button"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			graph, err := model.NewGraph(doc, map[model.ObjectID]*model.Node{
+				doc: {ID: doc, Role: "document web"},
+			}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			direct := map[model.ObjectID]*model.Node{
+				ancestor: {ID: ancestor, Role: "panel", Redacted: test.protect},
+				dialog:   {ID: dialog, Role: "dialog", Name: "Unverified context"},
+				button:   {ID: button, Role: "push button", Name: "Choose", States: map[string]bool{"enabled": true}, Attributes: map[string]string{"tag": "button"}},
+			}
+			value, access, store := nativeFocusEngine(t, graph, direct)
+			access.graphErr = context.DeadlineExceeded
+			access.parents = map[model.ObjectID]model.ObjectID{button: dialog, dialog: ancestor, ancestor: test.parent}
+			items := nativeFocusOutput(t, value, access, store, button)
+			if got := focusSpeech(items); !strings.Contains(got, test.want) {
+				t.Fatalf("focus speech = %q, want %q", got, test.want)
+			}
+			for _, item := range items {
+				if strings.Contains(item.Text, "Unverified context") || (test.protect && strings.Contains(item.Text, "Choose")) {
+					t.Fatalf("unexpected context in %s: %q", item.Kind, item.Text)
+				}
+			}
+		})
+	}
+}
+
 func TestNativeFocusContextStartsFreshInEachSession(t *testing.T) {
 	document := model.ObjectID{Bus: "app", Path: "/document"}
 	group := model.ObjectID{Bus: "app", Path: "/group"}

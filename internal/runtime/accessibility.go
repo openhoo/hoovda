@@ -30,6 +30,10 @@ func (a *Accessibility) ReadNode(ctx context.Context, id model.ObjectID) (*model
 	return a.client.ReadNode(ctx, id)
 }
 
+func (a *Accessibility) Parent(ctx context.Context, id model.ObjectID) (model.ObjectID, error) {
+	return a.client.Parent(ctx, id)
+}
+
 func (a *Accessibility) DoDefaultAction(ctx context.Context, id model.ObjectID) error {
 	return a.client.DoDefaultAction(ctx, id)
 }

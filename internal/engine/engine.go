@@ -3634,6 +3634,14 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	nodeCopy := *node
 	node = &nodeCopy
 	isDocument := node.Role == "document web" || node.Role == "document frame"
+	e.mu.RLock()
+	graph := e.graph
+	_, haveFocus := graph.Node(id)
+	e.mu.RUnlock()
+	var livePath []*model.Node
+	if !haveFocus && !isDocument && nodeLooksLikeWebContent(node) {
+		livePath = e.missingFocusPath(ctx, graph, node)
+	}
 	e.mu.Lock()
 	// Refresh can replace the graph between reading the native object and
 	// taking this lock. Only the installed graph can own a browse cursor.
@@ -3648,6 +3656,10 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 		node.RelationText = cloneRelationText(existing.RelationText)
 	}
 	contextChain := focusContextChain(e.graph, node)
+	if !known && graph == e.graph && len(livePath) > 0 {
+		contextChain = livePath
+		node = livePath[len(livePath)-1]
+	}
 	common := 0
 	for common < len(e.focusContext) && common < len(contextChain) && e.focusContext[common] == contextChain[common].ID {
 		common++
@@ -3738,6 +3750,61 @@ func (e *Engine) moveCursorToFocusLocked(node *model.Node, fromBrowse bool) {
 		}
 	}
 	e.cursor.Object, e.cursor.Offset = node.ID, 0
+}
+
+// A busy browser can expose a new dialog's focused button before a complete
+// graph fits the refresh deadline. Recover only its parent path for output;
+// navigation must continue to use a complete graph.
+func (e *Engine) missingFocusPath(ctx context.Context, graph *model.Graph, leaf *model.Node) []*model.Node {
+	if graph == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
+	defer cancel()
+	parents, _ := e.access.(interface {
+		Parent(context.Context, model.ObjectID) (model.ObjectID, error)
+	})
+	tail := []*model.Node{leaf}
+	seen := map[model.ObjectID]bool{leaf.ID: true}
+	for len(tail) < 32 && ctx.Err() == nil {
+		child := tail[len(tail)-1]
+		parent := child.Parent
+		if !parent.Valid() && parents != nil {
+			var err error
+			parent, err = parents.Parent(ctx, child.ID)
+			if err != nil {
+				break
+			}
+		}
+		if !parent.Valid() || seen[parent] || parent.Bus != leaf.ID.Bus {
+			break
+		}
+		if anchor, found := graph.Node(parent); found {
+			path := focusContextChain(graph, anchor)
+			if len(path) == 0 || path[0].ID != graph.Root {
+				break
+			}
+			slices.Reverse(tail)
+			path = append(path, tail...)
+			model.RedactAncestorPath(path)
+			return path
+		}
+		seen[parent] = true
+		next, err := e.access.ReadNode(ctx, parent)
+		if err != nil || next == nil || next.ID != parent {
+			break
+		}
+		tail = append(tail, next)
+	}
+	// An incomplete chain cannot establish spoken context, but a protected
+	// parent already seen must still prevent its child's text from escaping.
+	slices.Reverse(tail)
+	model.RedactAncestorPath(tail)
+	last := tail[len(tail)-1:]
+	if last[0].IsProtected() {
+		return last
+	}
+	return nil
 }
 
 // Keep the presented path independently of the graph: a refresh can remove the

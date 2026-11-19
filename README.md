@@ -18,6 +18,24 @@ the target line. In review mode, moving the braille cursor leaves the editor's
 caret in place. A background document finishing its load does not supersede
 an object that still has native focus.
 
+## Testing the first announcement in a dialog
+
+Set an output checkpoint before activating the control that opens a dialog, then
+inspect the **native focus** speech after that checkpoint. On first focus,
+HooVDA presents the dialog’s accessible name and description (when enabled)
+alongside the focused control. Tabbing to a second control inside the same
+dialog should announce the new control once without repeating the dialog.
+A subsequent read command has its own output and cannot establish what was
+announced automatically.
+
+Chromium can deliver focus while a full AT-SPI tree refresh is still timing out.
+HooVDA can recover the focused control’s parent path from live AT-SPI links to
+the cached browser tree. It uses that path for presentation only: the last
+complete tree remains available for navigation. A cycle, disconnected parent
+or link to another application does not establish a dialog context. This
+behavior is covered by synthetic native-event tests; the separate locked
+profile below describes what is checked against NVDA reference evidence.
+
 ## Locked-profile release gate
 
 `hoovda conformance` now passes the seven-case declared corpus. Reference
@@ -46,6 +64,22 @@ from Liblouis-translated display cells. Linux/amd64 Chromium and
 `en-US`/`de-DE` are the only declared targets. The passing corpus proves only
 its declared browser cases. Current code remains a compatibility subset, not
 full NVDA parity.
+
+## Release artifacts
+
+Each versioned GitHub release includes a Linux/amd64 engine binary and
+`SHA256SUMS`. Download both to the same directory. On Linux, run
+`sha256sum -c SHA256SUMS`, `chmod +x hoovda-linux-amd64`, then
+`./hoovda-linux-amd64 version` to inspect the embedded version and full source
+revision. The binary needs the runtime services listed below to run a reader
+session. Companion projects can build the complete runtime from this repo’s
+Dockerfile at that revision; the image revision label and the running engine’s
+`version` output should both match the pin.
+
+To reproduce the release binary, use the Go version in `go.mod`, check out the
+clean release tag, and run `tools/release-binary.sh vMAJOR.MINOR.PATCH` with
+that tag. It writes the binary and checksum under `dist/<tag>/` and derives
+the embedded build date from the commit.
 
 ## Local development
 
