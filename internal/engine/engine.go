@@ -2992,6 +2992,9 @@ func (e *Engine) handleStateChange(ctx context.Context, native NativeEvent) {
 	focused := e.focus == native.Source
 	e.mu.RUnlock()
 	if !focused {
+		if state == "selected" && native.Detail1 != 0 {
+			e.announceCollapsedSelectOption(ctx, native.Source)
+		}
 		return
 	}
 	node, err := e.access.ReadNode(ctx, native.Source)
@@ -3004,6 +3007,46 @@ func (e *Engine) handleStateChange(ctx context.Context, native NativeEvent) {
 	}
 	node.States[state] = native.Detail1 != 0
 	e.emit(e.presenter.Present(node, "focus"), node, e.causalEventCommand(), "nativeStateChange", "normal")
+}
+
+// Chromium leaves focus on a collapsed HTML select and sends the positive
+// selected-state event on an option inside its hidden popup. Read the live
+// children: React can replace the options since the last graph snapshot.
+func (e *Engine) announceCollapsedSelectOption(ctx context.Context, optionID model.ObjectID) {
+	e.mu.RLock()
+	focus := e.focus
+	cached, _ := e.graph.Node(focus)
+	candidate := e.browserWindowActive && e.webContentFocused && cached != nil &&
+		cached.Role == "combo box" && cached.Attributes["tag"] == "select"
+	e.mu.RUnlock()
+	if !candidate {
+		return
+	}
+
+	combo, err := e.access.ReadNode(ctx, focus)
+	if err != nil || combo == nil || combo.Role != "combo box" || combo.Attributes["tag"] != "select" ||
+		!combo.HasState("focused") || combo.HasState("expanded") || e.protectNodeContent(combo).IsProtected() {
+		return
+	}
+	if !slices.Contains(combo.Children, optionID) {
+		if len(combo.Children) != 1 {
+			return
+		}
+		popup, err := e.access.ReadNode(ctx, combo.Children[0])
+		if err != nil || popup == nil || (popup.Role != "menu" && popup.Role != "list box") || !slices.Contains(popup.Children, optionID) {
+			return
+		}
+	}
+	option, err := e.access.ReadNode(ctx, optionID)
+	if err != nil || option == nil || option.Attributes["tag"] != "option" || !option.HasState("selected") {
+		return
+	}
+	option = e.protectNodeContent(option)
+	if option.IsProtected() {
+		return
+	}
+	value := option.SpokenContent()
+	e.emit(profile.Presentation{Speech: value, Braille: value}, option, e.causalEventCommand(), "nativeSelectionChange", "normal")
 }
 
 type liveRegionMetadata struct {
