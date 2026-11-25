@@ -3336,12 +3336,23 @@ func (e *Engine) handleLiveTextChange(ctx context.Context, native NativeEvent) {
 	e.mu.RUnlock()
 	containerInsertion := metadata.containerOwned && metadata.container != nil && native.Source == metadata.container.ID
 	addition := strings.Contains(strings.ToLower(native.Detail), "insert") && metadata.relevant["additions"] && (!known || containerInsertion)
-	e.markLiveRegionSubtreeKnown(ctx, native.Source)
+	text, _ := native.Value.(string)
+	changeID := native.Source
+	// Chromium can deliver the same insertion on both the child (its text)
+	// and the live container (one embedded-object character). Only resolve
+	// a character offset to a child when the native hypertext proves the map.
+	if containerInsertion && !metadata.atomic && text == "\ufffc" && native.Detail2 == 1 && strings.Contains(strings.ToLower(native.Detail), "insert") {
+		if child := embeddedLiveChild(node, native.Detail1); child.Valid() && !node.IsProtected() {
+			if current, content := e.readLiveRegionContent(ctx, &model.Node{ID: child}); current != nil {
+				node, text, changeID = current, content, child
+			}
+		}
+	}
+	e.markLiveRegionSubtreeKnown(ctx, changeID)
 	if !metadata.relevant["text"] && !addition {
 		return
 	}
-	text, _ := native.Value.(string)
-	if containerInsertion && metadata.container != nil {
+	if containerInsertion && metadata.container != nil && changeID == native.Source {
 		if current, content := e.readLiveRegionContent(ctx, metadata.container); current != nil {
 			metadata.container, node, text = current, current, content
 		}
@@ -3352,8 +3363,20 @@ func (e *Engine) handleLiveTextChange(ctx context.Context, native NativeEvent) {
 		}
 	}
 	if text != "" {
-		e.emitLiveRegion(profile.Presentation{Speech: text, Braille: text}, node, native.Source, metadata.priority)
+		e.emitLiveRegionChange(profile.Presentation{Speech: text, Braille: text}, node, native.Source, changeID, metadata.priority)
 	}
+}
+
+// Only an all-placeholder hypertext with exactly one character per child has
+// the same text offsets and child indices. Mixed inline content does not.
+func embeddedLiveChild(node *model.Node, offset int32) model.ObjectID {
+	if offset < 0 || int(offset) >= len(node.Children) {
+		return model.ObjectID{}
+	}
+	if len(node.Text) != len("\ufffc")*len(node.Children) || strings.Trim(node.Text, "\ufffc") != "" {
+		return model.ObjectID{}
+	}
+	return node.Children[offset]
 }
 
 func (e *Engine) handleLiveChildrenChange(ctx context.Context, native NativeEvent) {
@@ -3373,16 +3396,26 @@ func (e *Engine) handleLiveChildrenChange(ctx context.Context, native NativeEven
 	if !metadata.relevant[relevance] {
 		return
 	}
+	changedID, changeID := native.ValueObject, native.Source
+	if relevance == "additions" && !metadata.atomic && !node.IsProtected() {
+		// Some ChildrenChanged(add) signals contain just an index. Preserve
+		// the emitting parent as event provenance, but match the added object
+		// against its own TextChanged signal.
+		child := embeddedLiveChild(node, native.Detail1)
+		if child.Valid() && (!changedID.Valid() || changedID == child) {
+			changedID, changeID = child, child
+		}
+	}
 	if relevance == "additions" {
-		added := native.ValueObject
+		added := changedID
 		if !added.Valid() {
 			added = native.Source
 		}
 		e.markLiveRegionSubtreeKnown(ctx, added)
 	}
 	changed := node
-	if native.ValueObject.Valid() {
-		if current, readErr := e.access.ReadNode(ctx, native.ValueObject); readErr == nil && current != nil {
+	if changedID.Valid() {
+		if current, readErr := e.access.ReadNode(ctx, changedID); readErr == nil && current != nil {
 			changed = e.protectNodeContent(current)
 		}
 	}
@@ -3394,7 +3427,7 @@ func (e *Engine) handleLiveChildrenChange(ctx context.Context, native NativeEven
 		}
 	}
 	if text != "" {
-		e.emitLiveRegion(profile.Presentation{Speech: text, Braille: text}, node, native.Source, metadata.priority)
+		e.emitLiveRegionChange(profile.Presentation{Speech: text, Braille: text}, node, native.Source, changeID, metadata.priority)
 	}
 }
 
@@ -3525,6 +3558,10 @@ func (e *Engine) readLiveRegionContent(ctx context.Context, container *model.Nod
 }
 
 func (e *Engine) emitLiveRegion(presentation profile.Presentation, node *model.Node, nativeSource model.ObjectID, priority string) {
+	e.emitLiveRegionChange(presentation, node, nativeSource, nativeSource, priority)
+}
+
+func (e *Engine) emitLiveRegionChange(presentation profile.Presentation, node *model.Node, nativeSource, changeID model.ObjectID, priority string) {
 	if !e.presenter.Settings().ReportDynamicContentChanges {
 		return
 	}
@@ -3566,7 +3603,7 @@ func (e *Engine) emitLiveRegion(presentation profile.Presentation, node *model.N
 	// only the last one: assertive and polite transport signals can interleave.
 	const duplicateWindow = 750 * time.Millisecond
 	const interruptionWindow = 100 * time.Millisecond
-	key := liveRegionAnnouncement{source: nativeSource, text: presentation.Speech, priority: priority}
+	key := liveRegionAnnouncement{source: changeID, text: presentation.Speech, priority: priority}
 	for candidate, emittedAt := range e.recentLiveRegions {
 		if now.Sub(emittedAt) >= duplicateWindow {
 			delete(e.recentLiveRegions, candidate)
