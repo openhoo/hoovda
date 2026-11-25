@@ -64,8 +64,7 @@ const clamp = (x) =>
     .trim()
     .slice(0, 400);
 const err = (e) => clamp(e?.message ?? e);
-const mini = (o) =>
-  o ? { role: o.role, name: clamp(o.name), value: clamp(o.value) } : null;
+const mini = (o) => (o ? { role: o.role, name: clamp(o.name) } : null);
 function evidence(events = []) {
   const byKind = (kind) =>
     events

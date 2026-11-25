@@ -18,6 +18,10 @@ the target line. In review mode, moving the braille cursor leaves the editor's
 caret in place. A background document finishing its load does not supersede
 an object that still has native focus.
 
+On an empty editor, its label and role remain readable in braille. No cursor
+is drawn over the label, and routing keys on those cells leave the caret in
+place. Long labels can still be panned.
+
 ## Testing the first announcement in a dialog
 
 Set an output checkpoint before activating the control that opens a dialog, then
