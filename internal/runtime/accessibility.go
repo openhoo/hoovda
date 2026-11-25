@@ -14,10 +14,11 @@ import (
 type Accessibility struct {
 	client *atspi.Client
 	events chan engine.NativeEvent
+	focus  chan engine.NativeEvent
 }
 
 func NewAccessibility(client *atspi.Client) *Accessibility {
-	a := &Accessibility{client: client, events: make(chan engine.NativeEvent, 1024)}
+	a := &Accessibility{client: client, events: make(chan engine.NativeEvent, 1024), focus: make(chan engine.NativeEvent, 128)}
 	go a.forwardEvents()
 	return a
 }
@@ -56,16 +57,24 @@ func (a *Accessibility) GenerateMouseEvent(ctx context.Context, x, y int, name s
 
 func (a *Accessibility) Events() <-chan engine.NativeEvent { return a.events }
 
+func (a *Accessibility) FocusEvents() <-chan engine.NativeEvent { return a.focus }
+
 func (a *Accessibility) forwardEvents() {
 	defer close(a.events)
+	defer close(a.focus)
 	for event := range a.client.Events() {
 		var valueObject model.ObjectID
 		if reference, ok := event.Value.(atspi.ObjectReference); ok {
 			valueObject = reference.Model()
 		}
-		a.events <- engine.NativeEvent{
+		n := engine.NativeEvent{
 			Name: event.Name, Source: event.Source, Detail: event.Detail,
 			Detail1: event.Detail1, Detail2: event.Detail2, Value: event.Value, ValueObject: valueObject,
+		}
+		if n.IsFocusGain() {
+			a.focus <- n
+		} else {
+			a.events <- n
 		}
 	}
 }
