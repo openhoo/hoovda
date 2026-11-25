@@ -30,7 +30,10 @@ func webFocusIndependentOfChrome(graph *model.Graph, id model.ObjectID) bool {
 			return false
 		}
 		// Header and relation strings in the snapshot are used for presentation.
-		for _, targets := range n.Relations {
+		// Structural relations such as “embedded by” identify windows; their
+		// target text is not part of the spoken name or description.
+		for _, relation := range []string{"labelled by", "described by", "details", "error message"} {
+			targets := n.Relations[relation]
 			for _, target := range targets {
 				if !hasDocumentAncestor(graph, target) {
 					return false

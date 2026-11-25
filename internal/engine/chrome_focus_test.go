@@ -22,6 +22,8 @@ func TestBrowserStatusNameDoesNotDelayUnrelatedWebFocus(t *testing.T) {
 				link:  {ID: link, Role: "link", Name: "Recent", Parent: doc}, bubble: {ID: bubble, Role: "frame", Parent: root, Children: []model.ObjectID{status}},
 				status: {ID: status, Role: "static", Name: "Status text", Parent: bubble},
 			}
+			// A document routinely exposes structural AT-SPI relations to the browser UI.
+			nodes[doc].Relations = map[string][]model.ObjectID{"embedded by": {frame}}
 			if test.referencesStatus {
 				nodes[link].Relations = map[string][]model.ObjectID{"described by": {status}}
 			}
