@@ -1014,9 +1014,12 @@ func TestBraillePanAndRouteUseLogicalMultilineDisplayLines(t *testing.T) {
 	if braille := brailleAfter(t, store, before); braille != "Omega last" {
 		t.Fatalf("pan forward braille = %q", braille)
 	}
-	engine.mu.Lock()
-	engine.brailleOffset = 0
-	engine.mu.Unlock()
+	// Return to the first displayed line using the same inputs as a user.
+	for range 2 {
+		if err := engine.ExecuteDirect(context.Background(), "braillePanBack"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	before = store.Cursor()
 	if err := engine.ExecuteDirectWithArgument(context.Background(), "brailleRoute", "0"); err != nil {
 		t.Fatal(err)
