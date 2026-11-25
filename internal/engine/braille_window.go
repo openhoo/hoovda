@@ -23,8 +23,9 @@ const displayWidth = 40
 type brailleWindow struct {
 	object                          model.ObjectID
 	source, line                    string
-	sourceStart, displayStart, span int // rune offsets in the native text and presented line
-	first                           int // index in the translated cells
+	sourceStart, displayStart, span int  // rune offsets in the native text and presented line
+	first                           int  // index in the translated cells
+	wholeFrame                      bool // ordinary presentation, before panning or routing
 }
 
 // Routing into an editor uses offsets in AT-SPI Text. Its accessible name can
@@ -137,6 +138,7 @@ func (e *Engine) emitLogicalBraille(sessionID, text string, node *model.Node, co
 			}
 		}
 	}
+	w.wholeFrame = true
 	e.brailleWindow = w
 	e.brailleOffset = 0
 	if reason == "brailleLine" {
@@ -211,7 +213,7 @@ func (e *Engine) displayCommand(ctx context.Context, cmd profile.Command, arg st
 		caret = live.CaretOffset
 	}
 	multiline := strings.Contains(source, "\n")
-	if w.object != node.ID || w.source != source || strings.Contains(w.line, "\n") {
+	if w.object != node.ID || w.source != source || (isPan && strings.Contains(w.line, "\n")) {
 		if multiline {
 			r, err := textRangeAt(node.ID, source, caret, model.TextUnitLine)
 			if err != nil {
@@ -233,7 +235,9 @@ func (e *Engine) displayCommand(ctx context.Context, cmd profile.Command, arg st
 	}
 	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	m, err := mapper.TranslateMapped(bounded, w.line, e.cfg.Locale)
+	// A routing key indexes the cells we actually displayed, including label
+	// prefixes and earlier lines of an ordinary focus frame.
+	m, err := mapBrailleBuffer(bounded, mapper, w.line, e.cfg.Locale)
 	if err != nil {
 		return fmt.Errorf("map braille line: %w", err)
 	}
@@ -266,7 +270,7 @@ func (e *Engine) displayCommand(ctx context.Context, cmd profile.Command, arg st
 		}
 	} else {
 		pos := w.first + cell
-		if cell >= displayWidth || pos >= len(m.CellToRune) {
+		if (!w.wholeFrame && cell >= displayWidth) || pos >= len(m.CellToRune) {
 			return nil
 		}
 		displayRune := m.CellToRune[pos]
@@ -335,6 +339,7 @@ func (e *Engine) displayCommand(ctx context.Context, cmd profile.Command, arg st
 		e.mu.Unlock()
 		return nil
 	}
+	w.wholeFrame = false
 	e.brailleWindow = w
 	e.brailleOffset = w.sourceStart + min(w.span, max(0, a-w.displayStart))
 	if isPan && multiline {
