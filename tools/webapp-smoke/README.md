@@ -30,3 +30,7 @@ The focused-link probe keeps one Lobsters page open in each isolated desktop. It
 ```sh
 node focus-latency.mjs --original http://127.0.0.1:53161 --original-cdp http://127.0.0.1:53162 --candidate http://127.0.0.1:53163 --candidate-cdp http://127.0.0.1:53164 --token-file /path/to/control-token --out /path/to/focus-latency.json
 ```
+
+### Longer TodoMVC workflow
+
+Use `todo-flow.mjs` with the same `--control`, `--cdp`, `--token-file`, `--label`, `--out` and optional `--playwright` arguments. It opens a fresh context on the public JavaScript ES6 demo and checks eight steps: create two tasks, edit one, check it, switch to Active, switch to Completed, clear completed, return to All, and reload. The check uses the site's double-click editor, keyboard input, and physical reader commands to read and activate controls. It verifies application state, native speech and braille for the checked state and named controls, and records the Chromium accessibility tree. This ES6 deployment stores the tasks in memory: the reload step expects it to reset. Its item checkboxes lack accessible names; the test checks their state without inventing a name.
