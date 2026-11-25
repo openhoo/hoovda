@@ -167,3 +167,46 @@ func TestMultilineEditableCaretIndexesCompleteWireTranslation(t *testing.T) {
 		}
 	}
 }
+
+func TestEmptyEditableBrailleDoesNotRouteLabelOrHint(t *testing.T) {
+	for _, tc := range []struct{ name, label, hint string }{
+		{"label", "Search", ""},
+		{"placeholder name", "Type a search", "Type a search"},
+		{"long label", strings.Repeat("Search ", 12) + "catalogue", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := model.ObjectID{Bus: "app", Path: "/edit"}
+			n := &model.Node{ID: id, Role: "entry", Name: tc.label, States: map[string]bool{"editable": true}, Attributes: map[string]string{"placeholder-text": tc.hint}}
+			g, err := model.NewGraph(id, map[model.ObjectID]*model.Node{id: n}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e, s := engineForGraph(t, g)
+			e.braille = contractedFixture{}
+			e.focus = id
+			e.review = model.Cursor{Object: id}
+			presentation := e.presenter.Present(n, "read")
+			e.emit(presentation, n, "readCurrent", "read", "normal")
+			v := lastBraille(t, s, 0)
+			if !strings.Contains(v.Text, tc.label) || len(v.BrailleCells) == 0 || v.BrailleCursor != nil {
+				t.Errorf("empty field: text %q, %d cells, has cursor %v", v.Text, len(v.BrailleCells), v.BrailleCursor != nil)
+			}
+			if len(tc.label) > displayWidth {
+				before := s.Cursor()
+				if err := e.ExecuteDirect(context.Background(), "braillePanForward"); err != nil {
+					t.Fatal(err)
+				}
+				pan := lastBraille(t, s, before)
+				if !slices.Equal(pan.BrailleCells, v.BrailleCells[displayWidth:displayWidth*2]) || pan.BrailleCursor != nil || e.State().BrailleOffset != 0 {
+					t.Errorf("panning the label: cells %v, cursor %v, source offset %d", pan.BrailleCells, pan.BrailleCursor, e.State().BrailleOffset)
+				}
+			}
+			if err := e.ExecuteDirectWithArgument(context.Background(), "brailleRoute", "3"); err != nil {
+				t.Fatal(err)
+			}
+			if n.CaretOffset != 0 || e.State().Review.Offset != 0 {
+				t.Errorf("routing label moved caret to %d or review to %d; field is empty", n.CaretOffset, e.State().Review.Offset)
+			}
+		})
+	}
+}

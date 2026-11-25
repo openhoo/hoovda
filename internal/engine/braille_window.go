@@ -27,6 +27,15 @@ type brailleWindow struct {
 	first                           int // index in the translated cells
 }
 
+// Routing into an editor uses offsets in AT-SPI Text. Its accessible name can
+// still be displayed and panned when the text is empty, but isn't editable.
+func brailleSource(node *model.Node) string {
+	if node.HasState("editable") {
+		return node.Text
+	}
+	return navigableText(node)
+}
+
 // A label, role or status on the display isn't a character in an editable field.
 // Keep only unambiguous spans. Trimming by the presenter must not shift the native caret.
 func presentedWindow(node *model.Node, line string) brailleWindow {
@@ -34,7 +43,7 @@ func presentedWindow(node *model.Node, line string) brailleWindow {
 	if node == nil || node.IsProtected() || strings.ContainsRune(node.Text, '\ufffc') {
 		return w
 	}
-	source := navigableText(node)
+	source := brailleSource(node)
 	w.object, w.source, w.line = node.ID, source, line
 	trimmed := strings.TrimSpace(source)
 	if trimmed == "" || strings.Count(line, trimmed) != 1 {
@@ -185,8 +194,8 @@ func (e *Engine) displayCommand(ctx context.Context, cmd profile.Command, arg st
 			cell = v
 		}
 	}
-	source := navigableText(node)
-	if source == "" {
+	source := brailleSource(node)
+	if source == "" && (!isPan || !node.HasState("editable")) {
 		return nil
 	}
 	edit := node.ID == focus && node.HasState("editable") && tether != "review"
@@ -327,13 +336,16 @@ func (e *Engine) displayCommand(ctx context.Context, cmd profile.Command, arg st
 		return nil
 	}
 	e.brailleWindow = w
-	e.brailleOffset = w.sourceStart + max(0, a-w.displayStart)
+	e.brailleOffset = w.sourceStart + min(w.span, max(0, a-w.displayStart))
 	if isPan && multiline {
 		e.review.Object, e.review.Offset = node.ID, w.sourceStart
 	}
 	session := e.activeSession
 	e.mu.Unlock()
-	cursor := mappedCursor(w, m, caret)
+	var cursor *int
+	if source != "" {
+		cursor = mappedCursor(w, m, caret)
+	}
 
 	cells := m.Cells[start:end]
 	// An insertion caret just beyond the final translated cell occupies a blank

@@ -71,8 +71,7 @@ const norm = (x) =>
 const has = (xs, expected) =>
   !!norm(expected) && xs.some((x) => norm(x.text).includes(norm(expected)));
 const err = (e) => clamp(e?.message ?? e);
-const mini = (o) =>
-  o ? { role: o.role, name: clamp(o.name), value: clamp(o.value) } : null;
+const mini = (o) => (o ? { role: o.role, name: clamp(o.name) } : null);
 function evidence(events = []) {
   const byKind = (kind) =>
     events
