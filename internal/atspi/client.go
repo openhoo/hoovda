@@ -204,46 +204,18 @@ func graphHasWebDocument(graph *model.Graph) bool {
 }
 
 func (c *Client) buildGraph(ctx context.Context, root ObjectReference) (*model.Graph, error) {
-	const maxObjects = 100_000
 	cache := c.cacheSnapshot(ctx, root)
-	nodes := make(map[model.ObjectID]*model.Node)
-	type item struct {
-		ref    ObjectReference
-		parent model.ObjectID
-		depth  int
-	}
-	queue := []item{{ref: root}}
-	for len(queue) > 0 {
-		if len(nodes) >= maxObjects {
-			return nil, errors.New("accessible graph exceeds object limit")
-		}
-		current := queue[0]
-		queue = queue[1:]
-		id := current.ref.Model()
-		if _, exists := nodes[id]; exists {
-			continue
-		}
-		if current.depth > 512 {
-			return nil, errors.New("accessible graph exceeds depth limit")
-		}
+	nodes, err := walkNativeTree(ctx, root.Model(), func(id model.ObjectID) (*model.Node, error) {
 		var cached *CacheItem
 		if cache != nil {
-			if item, live := cache.items[id]; live {
+			if item, ok := cache.items[id]; ok {
 				cached = &item
 			}
 		}
-		node, err := c.readNodeWithRetry(ctx, current.ref, cached)
-		if err != nil {
-			if current.depth == 0 {
-				return nil, err
-			}
-			continue
-		}
-		node.Parent = current.parent
-		nodes[id] = node
-		for _, childID := range node.Children {
-			queue = append(queue, item{ref: ObjectReference{Bus: childID.Bus, Path: dbus.ObjectPath(childID.Path)}, parent: id, depth: current.depth + 1})
-		}
+		return c.readNodeWithRetry(ctx, ObjectReference{Bus: id.Bus, Path: dbus.ObjectPath(id.Path)}, cached)
+	})
+	if err != nil {
+		return nil, err
 	}
 	pruneMissingChildren(nodes)
 	graph, err := model.NewGraph(root.Model(), nodes, c.revision.Add(1))
@@ -304,6 +276,11 @@ func (c *Client) readNodeWithRetry(ctx context.Context, ref ObjectReference, cac
 		var node *model.Node
 		attemptCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 		node, err = c.readNodeUsingCache(attemptCtx, ref, cached)
+		// Optional interfaces may be absent, but an expired read budget does
+		// not establish that fields or children are absent.
+		if err == nil {
+			err = attemptCtx.Err()
+		}
 		cancel()
 		if err == nil {
 			return node, nil
