@@ -50,6 +50,53 @@ func TestValidateActiveWebDocumentAcceptsCompleteNewestDocument(t *testing.T) {
 	}
 }
 
+// Chromium can retain "focused" on a document in an inactive but showing window.
+func TestValidateDocumentUsesForegroundWindow(t *testing.T) {
+	for _, tt := range []struct {
+		name                                                   string
+		hasActiveFrame, foregroundComplete, backgroundComplete bool
+		wantEmpty                                              string
+	}{
+		{"inactive empty focused document", true, true, false, ""},
+		{"foreground incomplete despite populated background", true, false, true, "/foreground"},
+		{"no active window falls back to document focus", false, true, false, "/background"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			id := func(path string) model.ObjectID { return model.ObjectID{Bus: "app", Path: path} }
+			app, front, back := id("/app"), id("/frontWindow"), id("/backWindow")
+			fg, bg := id("/foreground"), id("/background")
+			nodes := map[model.ObjectID]*model.Node{
+				app:   {ID: app, Role: "application", Children: []model.ObjectID{back, front}},
+				front: {ID: front, Role: "frame", Parent: app, Children: []model.ObjectID{fg}, States: map[string]bool{"active": tt.hasActiveFrame, "showing": true}},
+				back:  {ID: back, Role: "frame", Parent: app, Children: []model.ObjectID{bg}, States: map[string]bool{"showing": true}},
+				fg:    {ID: fg, Parent: front, Role: "document web", States: map[string]bool{"showing": true}},
+				bg:    {ID: bg, Parent: back, Role: "document web", States: map[string]bool{"showing": true, "focused": true}},
+			}
+			for d, complete := range map[model.ObjectID]bool{fg: tt.foregroundComplete, bg: tt.backgroundComplete} {
+				if complete {
+					child := id(d.Path + "/heading")
+					nodes[child] = &model.Node{ID: child, Role: "heading", Parent: d}
+					nodes[d].Children = []model.ObjectID{child}
+				}
+			}
+			g, err := model.NewGraph(app, nodes, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validateActiveWebDocument(g)
+			if tt.wantEmpty == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantEmpty+" has no accessible children") {
+				t.Fatalf("expected incomplete %s, got %v", tt.wantEmpty, err)
+			}
+		})
+	}
+}
+
 func TestValidateActiveWebDocumentAcceptsFocusedEmptyEmbeddedDocument(t *testing.T) {
 	for _, role := range []string{"document web", "document frame"} {
 		t.Run(role, func(t *testing.T) {

@@ -204,46 +204,18 @@ func graphHasWebDocument(graph *model.Graph) bool {
 }
 
 func (c *Client) buildGraph(ctx context.Context, root ObjectReference) (*model.Graph, error) {
-	const maxObjects = 100_000
 	cache := c.cacheSnapshot(ctx, root)
-	nodes := make(map[model.ObjectID]*model.Node)
-	type item struct {
-		ref    ObjectReference
-		parent model.ObjectID
-		depth  int
-	}
-	queue := []item{{ref: root}}
-	for len(queue) > 0 {
-		if len(nodes) >= maxObjects {
-			return nil, errors.New("accessible graph exceeds object limit")
-		}
-		current := queue[0]
-		queue = queue[1:]
-		id := current.ref.Model()
-		if _, exists := nodes[id]; exists {
-			continue
-		}
-		if current.depth > 512 {
-			return nil, errors.New("accessible graph exceeds depth limit")
-		}
+	nodes, err := walkNativeTree(ctx, root.Model(), func(id model.ObjectID) (*model.Node, error) {
 		var cached *CacheItem
 		if cache != nil {
-			if item, live := cache.items[id]; live {
+			if item, ok := cache.items[id]; ok {
 				cached = &item
 			}
 		}
-		node, err := c.readNodeWithRetry(ctx, current.ref, cached)
-		if err != nil {
-			if current.depth == 0 {
-				return nil, err
-			}
-			continue
-		}
-		node.Parent = current.parent
-		nodes[id] = node
-		for _, childID := range node.Children {
-			queue = append(queue, item{ref: ObjectReference{Bus: childID.Bus, Path: dbus.ObjectPath(childID.Path)}, parent: id, depth: current.depth + 1})
-		}
+		return c.readNodeWithRetry(ctx, ObjectReference{Bus: id.Bus, Path: dbus.ObjectPath(id.Path)}, cached)
+	})
+	if err != nil {
+		return nil, err
 	}
 	pruneMissingChildren(nodes)
 	graph, err := model.NewGraph(root.Model(), nodes, c.revision.Add(1))
@@ -304,6 +276,11 @@ func (c *Client) readNodeWithRetry(ctx context.Context, ref ObjectReference, cac
 		var node *model.Node
 		attemptCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 		node, err = c.readNodeUsingCache(attemptCtx, ref, cached)
+		// Optional interfaces may be absent, but an expired read budget does
+		// not establish that fields or children are absent.
+		if err == nil {
+			err = attemptCtx.Err()
+		}
 		cancel()
 		if err == nil {
 			return node, nil
@@ -331,12 +308,16 @@ func validateActiveWebDocument(graph *model.Graph) error {
 	if graph == nil {
 		return errors.New("accessible graph is nil")
 	}
-	if err := validateActiveBrowserFrame(graph); err != nil {
+	frameObjects, err := validateBrowserFrame(graph)
+	if err != nil {
 		return err
 	}
 	var active *model.Node
 	activeRank := -1
 	for _, id := range graph.Order {
+		if frameObjects != nil && !frameObjects[id] {
+			continue
+		}
 		node := graph.Nodes[id]
 		if node == nil || (node.Role != "document web" && node.Role != "document frame") {
 			continue
@@ -387,13 +368,16 @@ func validateActiveWebDocument(graph *model.Graph) error {
 	return nil
 }
 
-func validateActiveBrowserFrame(graph *model.Graph) error {
+// validateBrowserFrame checks that the selected window is complete. If AT-SPI
+// explicitly marks a frame active, return its objects so only documents in that
+// window compete for focus. A background Chrome window can keep its focused
+// document state, even while the user works in another window.
+func validateBrowserFrame(graph *model.Graph) (map[model.ObjectID]bool, error) {
 	var active *model.Node
 	activeRank := -1
-	for _, id := range graph.Order {
-		node := graph.Nodes[id]
+	consider := func(node *model.Node) {
 		if node == nil || node.Role != "frame" {
-			continue
+			return
 		}
 		rank := 0
 		if node.HasState("showing") {
@@ -406,11 +390,21 @@ func validateActiveBrowserFrame(graph *model.Graph) error {
 			active, activeRank = node, rank
 		}
 	}
+	// Unnamed native windows are present among the application children even
+	// when the semantic reading order omits them.
+	if root := graph.Nodes[graph.Root]; root != nil {
+		for _, id := range root.Children {
+			consider(graph.Nodes[id])
+		}
+	}
+	for _, id := range graph.Order {
+		consider(graph.Nodes[id])
+	}
 	if active == nil {
-		return nil
+		return nil, nil
 	}
 	if len(active.Children) == 0 {
-		return fmt.Errorf("active browser frame %s has no accessible children", active.ID)
+		return nil, fmt.Errorf("active browser frame %s has no accessible children", active.ID)
 	}
 	visited := map[model.ObjectID]bool{active.ID: true}
 	queue := append([]model.ObjectID(nil), active.Children...)
@@ -424,7 +418,7 @@ func validateActiveBrowserFrame(graph *model.Graph) error {
 		visited[id] = true
 		node := graph.Nodes[id]
 		if node == nil {
-			return fmt.Errorf("active browser frame %s references missing child %s", active.ID, id)
+			return nil, fmt.Errorf("active browser frame %s references missing child %s", active.ID, id)
 		}
 		if node.Role == "document web" || node.Role == "document frame" {
 			hasWebDocument = true
@@ -432,9 +426,13 @@ func validateActiveBrowserFrame(graph *model.Graph) error {
 		queue = append(queue, node.Children...)
 	}
 	if !hasWebDocument {
-		return fmt.Errorf("active browser frame %s has no web document", active.ID)
+		return nil, fmt.Errorf("active browser frame %s has no web document", active.ID)
 	}
-	return nil
+	if active.HasState("active") {
+		return visited, nil
+	}
+	// Without native active-window information, keep the document focus fallback.
+	return nil, nil
 }
 
 func (c *Client) ReadNode(ctx context.Context, id model.ObjectID) (*model.Node, error) {
