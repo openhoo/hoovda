@@ -71,6 +71,40 @@ func mappedCursor(w brailleWindow, m braille.Mapping, native int) *int {
 	return &cell
 }
 
+// lou_translate processes each physical line separately and preserves LF in
+// its output. Joining the per-line maps preserves the same cells and makes
+// caret positions after a newline meaningful in the complete wire buffer.
+func mapBrailleBuffer(ctx context.Context, mapper braille.Mapper, text, locale string) (braille.Mapping, error) {
+	if !strings.Contains(text, "\n") {
+		return mapper.TranslateMapped(ctx, text, locale)
+	}
+	var result braille.Mapping
+	for i, line := range strings.Split(text, "\n") {
+		if err := ctx.Err(); err != nil {
+			return braille.Mapping{}, err
+		}
+		if i > 0 {
+			r, c := len(result.RuneToCell), len(result.Cells)
+			result.CellToRune = append(result.CellToRune, r)
+			result.RuneToCell = append(result.RuneToCell, c)
+			result.Cells = append(result.Cells, '\n')
+		}
+		m, err := mapper.TranslateMapped(ctx, line, locale)
+		if err != nil {
+			return braille.Mapping{}, err
+		}
+		r, c := len(result.RuneToCell), len(result.Cells)
+		for _, v := range m.CellToRune {
+			result.CellToRune = append(result.CellToRune, r+v)
+		}
+		for _, v := range m.RuneToCell {
+			result.RuneToCell = append(result.RuneToCell, c+v)
+		}
+		result.Cells = append(result.Cells, m.Cells...)
+	}
+	return result, nil
+}
+
 func (e *Engine) emitLogicalBraille(sessionID, text string, node *model.Node, command, reason string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -100,9 +134,9 @@ func (e *Engine) emitLogicalBraille(sessionID, text string, node *model.Node, co
 		e.brailleOffset = w.sourceStart
 	}
 	e.mu.Unlock()
-	if node != nil && node.ID == focus && node.HasState("editable") && !node.IsProtected() && tether != "review" && w.span > 0 && !strings.Contains(text, "\n") {
+	if node != nil && node.ID == focus && node.HasState("editable") && !node.IsProtected() && tether != "review" && w.span > 0 {
 		if mapper, ok := e.braille.(braille.Mapper); ok {
-			if m, err := mapper.TranslateMapped(ctx, text, e.cfg.Locale); err == nil {
+			if m, err := mapBrailleBuffer(ctx, mapper, text, e.cfg.Locale); err == nil {
 				cells = m.Cells
 				// Ordinary events contain the whole translation, not a panned window.
 				i := node.CaretOffset - w.sourceStart + w.displayStart

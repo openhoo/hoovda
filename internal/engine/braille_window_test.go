@@ -146,3 +146,24 @@ func TestPanKeepsTranslatedCellsAndStaysOnLongLine(t *testing.T) {
 		t.Fatalf("routed %d, want %d", pos, mapped.CellToRune[42])
 	}
 }
+
+func TestMultilineEditableCaretIndexesCompleteWireTranslation(t *testing.T) {
+	id := model.ObjectID{Bus: "app", Path: "/multi"}
+	n := &model.Node{ID: id, Role: "entry", Name: "Field", Text: "the and\n\nfor with", States: map[string]bool{"editable": true}}
+	g, err := model.NewGraph(id, map[model.ObjectID]*model.Node{id: n}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, s := engineForGraph(t, g)
+	e.braille = contractedFixture{}
+	e.focus = id
+	for _, tc := range []struct{ native, cell int }{{4, 8}, {9, 11}, {13, 13}} {
+		n.CaretOffset = tc.native
+		before := s.Cursor()
+		e.emit(profile.Presentation{Braille: "Field " + n.Text + " edt"}, n, "readCurrent", "report", "normal")
+		v := lastBraille(t, s, before)
+		if !slices.Equal(v.BrailleCells, []byte{'F', 'i', 'e', 'l', 'd', ' ', 46, ' ', 47, 10, 10, 63, ' ', 62, ' ', 'e', 'd', 't'}) || v.BrailleCursor == nil || *v.BrailleCursor != tc.cell {
+			t.Fatalf("native %d: got %v cursor %v, want %d", tc.native, v.BrailleCells, v.BrailleCursor, tc.cell)
+		}
+	}
+}
