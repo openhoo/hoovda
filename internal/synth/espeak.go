@@ -44,7 +44,13 @@ func (e ESpeak) Synthesize(ctx context.Context, request Request) (Audio, error) 
 		"-p", strconv.Itoa(request.Pitch),
 		"-a", strconv.Itoa(request.Volume),
 	)
-	command.Stdin = strings.NewReader(request.Text)
+	// The pinned eSpeak NG stdin reader treats the last byte as a line
+	// terminator. Without an actual newline it pronounces "link" as "lin".
+	text := request.Text
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	command.Stdin = strings.NewReader(text)
 	stdout := processoutput.Buffer{Limit: maxWAVBytes}
 	stderr := processoutput.Buffer{Limit: 64 << 10}
 	command.Stdout, command.Stderr = &stdout, &stderr

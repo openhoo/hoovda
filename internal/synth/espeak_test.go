@@ -1,9 +1,11 @@
 package synth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,5 +59,39 @@ func TestESpeakBoundsProcessOutput(t *testing.T) {
 	_, err := (ESpeak{Command: command}).Synthesize(context.Background(), validSpeechRequest())
 	if err == nil || !strings.Contains(err.Error(), "output exceeds limit") {
 		t.Fatalf("unbounded subprocess output reached WAV decoder: %v", err)
+	}
+}
+
+// This is a real audio comparison when the pinned synthesizer is available.
+// The positional-argument baseline does not share the stdin framing code.
+func TestESpeakPreservesLastSpokenCharacter(t *testing.T) {
+	cmd := os.Getenv("HOOVDA_TEST_ESPEAK")
+	if cmd == "" {
+		var err error
+		cmd, err = exec.LookPath("espeak-ng")
+		if err != nil {
+			t.Skip("eSpeak NG not installed")
+		}
+	}
+	for _, tt := range []struct{ text, locale, voice string }{{"link", "en-US", "en-us"}, {"button", "en-US", "en-us"}, {"Menü", "de-DE", "de"}, {"Schalter", "de-DE", "de"}} {
+		t.Run(tt.text, func(t *testing.T) {
+			req := validSpeechRequest()
+			req.Text, req.Locale = tt.text, tt.locale
+			got, err := (ESpeak{Command: cmd}).Synthesize(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			control, err := exec.CommandContext(t.Context(), cmd, "--stdout", "-v", tt.voice, "-s", "175", "-p", "50", "-a", "100", tt.text).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := DecodeWAV(control)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.PCM) == 0 || !bytes.Equal(got.PCM, want.PCM) {
+				t.Fatal("stdin input did not produce the full-word reference waveform")
+			}
+		})
 	}
 }
