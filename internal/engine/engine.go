@@ -200,7 +200,10 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err := e.Refresh(refreshCtx); err != nil {
 		return err
 	}
-	go e.eventLoop(ctx)
+	go e.eventLoop(ctx, e.access.Events())
+	if transport, ok := e.access.(focusEventTransport); ok {
+		go e.eventLoop(ctx, transport.FocusEvents())
+	}
 	return nil
 }
 
@@ -254,6 +257,9 @@ func (e *Engine) Refresh(ctx context.Context) error {
 	}
 	if _, ok := graph.Node(e.review.Object); !ok {
 		e.review.Object, e.review.Offset = e.navigator, 0
+	}
+	if e.focus == focusAtStart && !e.pendingCursorFocus.Valid() {
+		e.recoverDocumentFocusLocked(graph)
 	}
 	e.ready = true
 	e.mu.Unlock()
@@ -498,6 +504,11 @@ func (e *Engine) causalEventCommand() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.activeAction != "" {
+		// A report reads the screen reader's position. It cannot cause
+		// page mutations arriving while its physical key is being prepared.
+		if cmd, ok := profile.CommandByID(e.activeAction); ok && (cmd.Category == "report" || cmd.Category == "tableReport") {
+			return "event"
+		}
 		return e.activeAction
 	}
 	return "event"
@@ -2827,18 +2838,26 @@ func (e *Engine) startSynthesisLocked(event events.Event, presentation profile.P
 	}()
 }
 
-func (e *Engine) eventLoop(ctx context.Context) {
+// A transport with a separate focus stream reports the current focused state
+// in ReadNode. Both streams use the same command gate and session generation.
+type focusEventTransport interface{ FocusEvents() <-chan NativeEvent }
+
+func (e *Engine) eventLoop(ctx context.Context, stream <-chan NativeEvent) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case native, ok := <-e.access.Events():
+		case native, ok := <-stream:
 			if !ok {
 				return
 			}
 			e.handleNativeEvent(ctx, native)
 		}
 	}
+}
+
+func (n NativeEvent) IsFocusGain() bool {
+	return strings.HasSuffix(n.Name, ".Focus") || (strings.HasSuffix(n.Name, ".StateChanged") && n.Detail == "focused" && n.Detail1 != 0)
 }
 
 func (e *Engine) handleNativeEvent(ctx context.Context, native NativeEvent) {
@@ -2899,7 +2918,7 @@ func (e *Engine) handleNativeEvent(ctx context.Context, native NativeEvent) {
 		}
 		e.mu.Unlock()
 	}
-	if strings.HasSuffix(native.Name, ".Focus") || (strings.HasSuffix(native.Name, ".StateChanged") && native.Detail == "focused" && native.Detail1 != 0) {
+	if native.IsFocusGain() {
 		if !e.handleFocus(ctx, native.Source) {
 			return
 		}
@@ -3101,6 +3120,18 @@ func (e *Engine) liveRegionMetadata(ctx context.Context, node *model.Node) (live
 			// The direct AT-SPI object can temporarily omit MEMBER_OF while the
 			// active graph still has, or soon acquires, the complete parent chain.
 			// Recover only a backlink-validated owner inside that active document.
+			if path, _ := e.foregroundWebPath(ctx, graph, inheritedContainer); len(path) > 1 {
+				for i := len(path) - 2; i >= 0 && slices.Contains(path[i].Children, path[i+1].ID); i-- {
+					ancestor := path[i]
+					if ancestor.HasState("busy") || strings.EqualFold(ancestor.Attributes["busy"], "true") || strings.EqualFold(ancestor.Attributes["live"], "off") {
+						return liveRegionMetadata{}, false
+					}
+					if definesLiveRegion(ancestor) {
+						metadata.priority, metadata.container, metadata.containerOwned = inheritedPriority, ancestor, true
+						return metadata, true
+					}
+				}
+			}
 			if _, owner := e.refreshForLiveRegionOwner(ctx, sourceID); owner != nil {
 				metadata.priority, metadata.container, metadata.containerOwned = inheritedPriority, owner, true
 				return metadata, true
@@ -3302,6 +3333,9 @@ func (e *Engine) handleLiveTextChange(ctx context.Context, native NativeEvent) {
 	if metadata.atomic && metadata.container != nil {
 		if current, content := e.readLiveRegionContent(ctx, metadata.container); current != nil {
 			metadata.container, node, text = current, current, content
+			if metadata.containerOwned {
+				changeID = current.ID
+			}
 		}
 	}
 	if text != "" {
@@ -3366,6 +3400,9 @@ func (e *Engine) handleLiveChildrenChange(ctx context.Context, native NativeEven
 	if metadata.atomic && metadata.container != nil {
 		if current, content := e.readLiveRegionContent(ctx, metadata.container); current != nil {
 			text, node = content, current
+			if metadata.containerOwned {
+				changeID = current.ID
+			}
 		}
 	}
 	if text != "" {
@@ -3427,6 +3464,10 @@ func (e *Engine) handleLivePropertyChange(ctx context.Context, native NativeEven
 func (e *Engine) readLiveRegionContent(ctx context.Context, container *model.Node) (*model.Node, string) {
 	if container == nil || !container.ID.Valid() {
 		return nil, ""
+	}
+	if container.IsProtected() {
+		redacted := container.RedactedContentCopy()
+		return &redacted, "[redacted]"
 	}
 	root, err := e.access.ReadNode(ctx, container.ID)
 	if err != nil || root == nil {
@@ -3584,16 +3625,32 @@ func (e *Engine) emitLiveRegionChange(presentation profile.Presentation, node *m
 
 func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	node, err := e.access.ReadNode(ctx, id)
-	if err != nil {
+	if err != nil || node == nil || node.ID != id {
 		e.logger.Debug("read focus object", "error", err)
+		return false
+	}
+	// A native focus signal may have waited behind graph work. Chromium exposes
+	// the live focused bit, so a superseded signal must not move the cursor.
+	if _, native := e.access.(focusEventTransport); native && len(node.States) > 0 && !node.HasState("focused") {
 		return false
 	}
 	e.mu.RLock()
 	known := e.graph != nil && e.graph.Nodes[id] != nil
 	contextStale := e.focusContextVersion != e.graphContextVersion ||
 		(e.chromeNameVersion != e.graphChromeNameVersion && !webFocusIndependentOfChrome(e.graph, id))
+	graphAtRead := e.graph
 	e.mu.RUnlock()
-	if !known || contextStale {
+	var fastPath []*model.Node
+	if node.HasState("focused") && nodeLooksLikeWebContent(node) && (!known || contextStale || graphHasOtherActiveFrame(graphAtRead, id)) {
+		path, background := e.foregroundWebPath(ctx, graphAtRead, node)
+		if background {
+			return false
+		}
+		if e.resolveFocusPathPresentation(ctx, path) {
+			fastPath = path
+		}
+	}
+	if (!known || contextStale) && len(fastPath) == 0 {
 		// Focus signals include browser chrome and can race application teardown.
 		// Never let this event-loop refresh inherit the process-lifetime context:
 		// a vanished preferred object would otherwise retain refreshMu forever.
@@ -3605,7 +3662,10 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 		if refreshErr != nil {
 			e.logger.Debug("refresh graph for new focus object", "error", refreshErr)
 		} else {
-			if refreshed, readErr := e.access.ReadNode(ctx, id); readErr == nil {
+			if refreshed, readErr := e.access.ReadNode(ctx, id); readErr == nil && refreshed != nil && refreshed.ID == id {
+				if _, native := e.access.(focusEventTransport); native && len(refreshed.States) != 0 && !refreshed.HasState("focused") {
+					return false
+				}
 				node = refreshed
 			}
 		}
@@ -3618,8 +3678,8 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	graph := e.graph
 	_, haveFocus := graph.Node(id)
 	e.mu.RUnlock()
-	var livePath []*model.Node
-	if !haveFocus && !isDocument && nodeLooksLikeWebContent(node) {
+	livePath := fastPath
+	if len(livePath) == 0 && !haveFocus && !isDocument && nodeLooksLikeWebContent(node) {
 		livePath = e.missingFocusPath(ctx, graph, node)
 	}
 	e.mu.Lock()
@@ -3636,9 +3696,15 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 		node.RelationText = cloneRelationText(existing.RelationText)
 	}
 	contextChain := focusContextChain(e.graph, node)
-	if !known && graph == e.graph && len(livePath) > 0 {
+	if graph == e.graph && len(livePath) > 0 && (len(fastPath) > 0 || !known) {
 		contextChain = livePath
-		node = livePath[len(livePath)-1]
+		leaf := livePath[len(livePath)-1]
+		if node.IsProtected() && !leaf.IsProtected() {
+			redacted := leaf.RedactedContentCopy()
+			leaf = &redacted
+			contextChain[len(contextChain)-1] = leaf
+		}
+		node = leaf
 	}
 	common := 0
 	for common < len(e.focusContext) && common < len(contextChain) && e.focusContext[common] == contextChain[common].ID {
@@ -3679,7 +3745,7 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	oldMode := e.cursor.Mode
 	if isDocument || !e.webContentFocused {
 		e.cursor.Mode = "browse"
-	} else if focusModeTarget(e.graph, node) {
+	} else if focusModeTarget(e.graph, node) || inWebApplication(contextChain) {
 		e.cursor.Mode = "focus"
 	} else {
 		e.cursor.Mode = "browse"
