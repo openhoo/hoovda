@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
+import { norm, hasName as has, matchesFocus } from "./target.mjs";
 import { cases } from "./cases.mjs";
 const { values: v } = parseArgs({
   options: Object.fromEntries(
@@ -62,14 +63,6 @@ const clamp = (x) =>
   String(x ?? "")
     .trim()
     .slice(0, 400);
-const norm = (x) =>
-  String(x ?? "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim();
-const has = (xs, expected) =>
-  !!norm(expected) && xs.some((x) => norm(x.text).includes(norm(expected)));
 const err = (e) => clamp(e?.message ?? e);
 const mini = (o) =>
   o ? { role: o.role, name: clamp(o.name), value: clamp(o.value) } : null;
@@ -111,6 +104,7 @@ const report = {
   schema: 2,
   sources: {
     runner: sha(readFileSync(new URL("./run.mjs", import.meta.url))),
+    target: sha(readFileSync(new URL("./target.mjs", import.meta.url))),
     cases: sha(readFileSync(new URL("./cases.mjs", import.meta.url))),
   },
   label: v.label,
@@ -490,9 +484,10 @@ async function testApp(c) {
         s.focus = mini(st.focus);
         s.mode = st.cursor?.mode;
         if (!target.name) {
-          s.error = "Target has no accessible name in Chromium";
-          return;
+          throw Error("Target has no accessible name in Chromium");
         }
+        if (!matchesFocus(target, s.focus))
+          throw Error("Native focus did not match the Chromium role and name");
         if (!has(s.speech, target.name) || !has(s.braille, target.name))
           throw Error(
             "First focus did not present the Chromium accessible name in both channels",
@@ -502,6 +497,8 @@ async function testApp(c) {
         s.expectedKey = [target.role, target.name].join(":");
         const r = await action("readCurrent");
         Object.assign(s, shaped(r));
+        if (!matchesFocus(target, s.focus))
+          throw Error("Read current did not identify the focused Chromium target");
         if (
           !target.name ||
           !has(s.speech, target.name) ||

@@ -8,10 +8,12 @@ Use a maintained Node release with built-in fetch, and Playwright Core matching 
 node run.mjs --label original --control http://127.0.0.1:53161 --cdp http://127.0.0.1:53162 --token-file /path/to/control-token --out /path/to/original.json
 node run.mjs --label candidate --control http://127.0.0.1:53163 --cdp http://127.0.0.1:53164 --token-file /path/to/control-token --out /path/to/candidate.json
 node compare.mjs /path/to/original.json /path/to/candidate.json /path/to/comparison.json
-node --test compare.test.mjs
+node --test *.test.mjs
 ```
 
 `--apps wikipedia,todomvc` selects deployments for targeted rechecks. `--timeout-ms` sets the navigation deadline (18 seconds by default); `--step-timeout-ms` sets the reader HTTP deadline (15 seconds). Use a new output file for each rerun. The runner writes incremental JSON, but only a report with `finished` set is a completed run. The runner only closes browser contexts it created.
+
+Focus and read-current require the native object to match the Chromium target’s role and name. Output checks use whole words, so section link “1” cannot match the title “RFC 9110.” The report records the matcher hash along with the runner and manifest.
 
 For each site the runner verifies its title, top-level HTTP status, hostname and public task target. For quick navigation it checks speech and braille against accessible names obtained from Chromium's accessibility tree. Some sites have no headings; those cases record the tree counts and omit the heading step. Ctrl+Home can already put the reader on the only target; in that case the test reads that target and records the actual operation. On Hacker News, the first home link wraps an unnamed logo; the runner retains its presentation and checks the next named link.
 

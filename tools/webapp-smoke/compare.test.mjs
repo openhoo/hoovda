@@ -99,6 +99,7 @@ test("checks source and manifest independently of browser identity before compar
   for (const [k, v] of [
     ["runner", "old"],
     ["cases", "other"],
+    ["target", "other"],
   ]) {
     assert.throws(
       () => validatePair(a, { ...a, sources: { ...a.sources, [k]: v } }),

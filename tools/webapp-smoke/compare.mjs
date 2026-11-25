@@ -47,7 +47,8 @@ export function validatePair(a, b) {
   if (
     a.schema !== b.schema ||
     a.sources?.runner !== b.sources?.runner ||
-    a.sources?.cases !== b.sources?.cases
+    a.sources?.cases !== b.sources?.cases ||
+    a.sources?.target !== b.sources?.target
   )
     throw Error(
       "Runner schema, runner source or case manifest differs across lanes",

@@ -17,6 +17,8 @@ jobs:
         with:
           go-version: '1.27.4'
           cache: true
+      - name: Check public web-app smoke assertions
+        run: node --test tools/webapp-smoke/*.test.mjs
       - run: go generate ./internal/atspi
       - run: git diff --exit-code -- internal/atspi/zz_generated_interfaces.go
       - run: go test -race ./...
