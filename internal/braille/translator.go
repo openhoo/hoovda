@@ -27,7 +27,8 @@ type Translator interface {
 }
 
 type Liblouis struct {
-	Command string
+	Command    string
+	MapCommand string
 }
 
 func (l Liblouis) Name() string { return "liblouis" }

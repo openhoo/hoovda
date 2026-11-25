@@ -67,19 +67,31 @@ full NVDA parity.
 
 ## Release artifacts
 
-Each versioned GitHub release includes a Linux/amd64 engine binary and
-`SHA256SUMS`. Download both to the same directory. On Linux, run
-`sha256sum -c SHA256SUMS`, `chmod +x hoovda-linux-amd64`, then
-`./hoovda-linux-amd64 version` to inspect the embedded version and full source
-revision. The binary needs the runtime services listed below to run a reader
-session. Companion projects can build the complete runtime from this repo’s
-Dockerfile at that revision; the image revision label and the running engine’s
-`version` output should both match the pin.
+The Linux/amd64 release includes the engine, its contracted-braille helper
+and `SHA256SUMS`. Download the three files to the same directory and run
+`sha256sum -c SHA256SUMS`. Install the engine as `hoovda` and the helper as
+`hoovda-braille-map` on the reader process's PATH, both executable. When
+`HOOVDA_LIBLOUIS_COMMAND` specifies an absolute path, install the helper
+alongside that executable. The helper needs the same Liblouis 3.38.0
+translation tables as `lou_translate`. The complete image supplies these
+programs, tables and the other runtime services.
 
-To reproduce the release binary, use the Go version in `go.mod`, check out the
-clean release tag, and run `tools/release-binary.sh vMAJOR.MINOR.PATCH` with
-that tag. It writes the binary and checksum under `dist/<tag>/` and derives
-the embedded build date from the commit.
+Run `hoovda version` to check the engine revision and
+`hoovda-braille-map --version` to check the protocol and linked library.
+The helper obtains the dot patterns and both position maps from the same
+Liblouis translation. This matters for routing: in English
+grade 2 the three letters of “the” can occupy one cell, while numbers and
+capitals can need an extra cell. Position maps refer to Unicode characters
+rather than UTF-8 bytes. The helper is needed for cell positions and routing.
+
+To reproduce the release, check out the clean release tag, use the Go
+version in `go.mod`, and run `tools/release-binary.sh vMAJOR.MINOR.PATCH`.
+The script builds both assets under `dist/<tag>/` and writes their
+checksums. The helper uses Docker Buildx with a pinned Linux/amd64 compiler
+and the pinned Liblouis static archive; it can also be built separately with
+`tools/release-braille-helper.sh OUTPUT_DIRECTORY`. Its source and link
+recipe are in `tools/braille-map/`. The image includes Liblouis source and
+licensing notices as described in `THIRD_PARTY_NOTICES.md`.
 
 ## Local development
 

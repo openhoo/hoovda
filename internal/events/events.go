@@ -48,7 +48,7 @@ type Event struct {
 	Text            string          `json:"text,omitempty"`
 	SpeechCommands  []SpeechCommand `json:"speechCommands,omitempty"`
 	BrailleCells    []byte          `json:"brailleCells,omitempty"`
-	BrailleCursor   int             `json:"brailleCursor,omitempty"`
+	BrailleCursor   *int            `json:"brailleCursor,omitempty"`
 	Mode            string          `json:"mode,omitempty"`
 	Reason          string          `json:"reason,omitempty"`
 	Priority        string          `json:"priority,omitempty"`
@@ -100,6 +100,10 @@ func cloneEvent(event Event) Event {
 	}
 	event.SpeechCommands = slices.Clone(event.SpeechCommands)
 	event.BrailleCells = slices.Clone(event.BrailleCells)
+	if event.BrailleCursor != nil {
+		cursor := *event.BrailleCursor
+		event.BrailleCursor = &cursor
+	}
 	return event
 }
 

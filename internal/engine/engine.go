@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +146,7 @@ type Engine struct {
 	speechMode              string
 	speechPaused            bool
 	brailleOffset           int
+	brailleWindow           brailleWindow
 	brailleTether           string
 	activeSession           string
 	sessionGeneration       uint64
@@ -381,6 +381,8 @@ func (e *Engine) BeginSession(id string) error {
 		return errors.New("another test session is active")
 	}
 	e.activeSession = id
+	e.brailleWindow = brailleWindow{}
+	e.brailleOffset = 0
 	e.sessionGeneration++
 	e.outputsSealed = false
 	e.presentationBaseline = baseline
@@ -795,7 +797,7 @@ func (e *Engine) execute(ctx context.Context, command profile.Command, argument 
 		if command.ID == "braillePreviousLine" || command.ID == "brailleNextLine" {
 			err = e.moveBrailleLine(ctx, command)
 		} else {
-			err = e.brailleControl(command, argument)
+			err = e.brailleControl(ctx, command, argument)
 		}
 	case "focus":
 		consume = false
@@ -1891,7 +1893,7 @@ func (e *Engine) speechControl(command profile.Command) error {
 	}
 }
 
-func (e *Engine) brailleControl(command profile.Command, argument string) error {
+func (e *Engine) brailleControl(ctx context.Context, command profile.Command, argument string) error {
 	e.mu.Lock()
 	graph := e.graph
 	node := graphNode(graph, e.review.Object)
@@ -1909,6 +1911,7 @@ func (e *Engine) brailleControl(command profile.Command, argument string) error 
 		e.brailleTether = values[(index+1)%len(values)]
 		tether := e.brailleTether
 		e.brailleOffset = 0
+		e.brailleWindow = brailleWindow{}
 		e.mu.Unlock()
 		e.emit(e.presenter.BrailleTether(tether), node, command.ID, "brailleTether", "normal")
 		return nil
@@ -1920,71 +1923,9 @@ func (e *Engine) brailleControl(command profile.Command, argument string) error 
 		e.mu.Unlock()
 		return errors.New("braille source object is unavailable")
 	}
-	switch command.ID {
-	case "braillePanBack", "braillePanForward":
-		text := navigableText(node)
-		if strings.Contains(text, "\n") {
-			value, _, err := moveReviewRange(node.ID, text, e.review.Offset, command.Direction, model.TextUnitLine, e.presenter)
-			if err != nil {
-				e.mu.Unlock()
-				return err
-			}
-			e.review.Object, e.review.Offset = node.ID, value.Start
-			e.brailleOffset = value.Start
-			e.mu.Unlock()
-			fragment, err := value.Text(text)
-			if err != nil {
-				return err
-			}
-			e.emit(profile.Presentation{Braille: fragment}, node, command.ID, "braillePan", "normal")
-			return nil
-		}
-		full := []rune(e.presenter.Present(node, "braille").Braille)
-		if command.Direction < 0 {
-			e.brailleOffset = max(0, e.brailleOffset-40)
-		} else if len(full) > 0 {
-			e.brailleOffset = min(max(0, len(full)-1), e.brailleOffset+40)
-		}
-		start := min(e.brailleOffset, len(full))
-		end := min(start+40, len(full))
-		fragment := string(full[start:end])
-		e.mu.Unlock()
-		e.emit(profile.Presentation{Braille: fragment}, node, command.ID, "braillePan", "normal")
-		return nil
-	case "brailleRoute", "brailleReportFormatting":
-		cell := 0
-		if strings.TrimSpace(argument) != "" {
-			parsed, err := strconv.Atoi(argument)
-			if err != nil || parsed < 0 || parsed > 199 {
-				e.mu.Unlock()
-				return errors.New("braille cell must be an integer from 0 to 199")
-			}
-			cell = parsed
-		}
-		text := navigableText(node)
-		offset := min(max(0, e.brailleOffset+cell), max(0, len([]rune(text))-1))
-		if command.ID == "brailleReportFormatting" {
-			e.mu.Unlock()
-			e.emit(e.presenter.TextFormatting(node, offset), node, command.ID, "brailleFormatting", "normal")
-			return nil
-		}
-		e.review.Object, e.review.Offset = node.ID, offset
-		e.cursor.Object, e.cursor.Offset = node.ID, offset
-		e.mu.Unlock()
-		value, err := textRangeAt(node.ID, text, offset, model.TextUnitLine)
-		if err != nil {
-			return err
-		}
-		fragment, err := value.Text(text)
-		if err != nil {
-			return err
-		}
-		e.emit(profile.Presentation{Braille: fragment}, node, command.ID, "brailleRoute", "normal")
-		return nil
-	default:
-		e.mu.Unlock()
-		return fmt.Errorf("unsupported braille-control command %q", command.ID)
-	}
+	view, review, focus, tether := e.brailleWindow, e.review, e.focus, e.brailleTether
+	e.mu.Unlock()
+	return e.displayCommand(ctx, command, argument, node, view, review, focus, tether)
 }
 
 func (e *Engine) moveContainer(command profile.Command) error {
@@ -2830,22 +2771,7 @@ func (e *Engine) emitEvidenceLocked(presentation profile.Presentation, node *mod
 		speechEvent = e.store.Append(events.Event{Kind: events.KindSpeech, SessionID: sessionID, CausalCommand: command, Source: source, Text: presentation.Speech, SpeechCommands: presentation.SpeechCommands, Reason: reason, Priority: priority, Provenance: events.ProvenanceScreenReaderOutput, Redacted: redacted})
 	}
 	if presentation.Braille != "" {
-		translationContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		translation, err := e.braille.Translate(translationContext, presentation.Braille, e.cfg.Locale, 0)
-		cancel()
-		if err != nil {
-			e.logger.Error("braille translation failed", "error", err)
-			// Logical text remains useful when the native translator fails, but
-			// character bytes are not physical braille dot patterns.
-			translation = braille.Result{Text: presentation.Braille}
-		}
-		// NVDA's braille spy exposes the logical braille buffer text separately
-		// from the translated cell array written to a display. Keep the same
-		// boundary: Text is the presenter-authored display line, while
-		// BrailleCells contains the locale-table translation. Publishing the
-		// Liblouis textual rendering here used to make assertions depend on the
-		// lou_translate output format instead of the screen-reader buffer.
-		e.store.Append(events.Event{Kind: events.KindBraille, SessionID: sessionID, CausalCommand: command, Source: source, Text: presentation.Braille, BrailleCells: translation.Cells, BrailleCursor: translation.Cursor, Reason: reason, Provenance: events.ProvenanceScreenReaderOutput, Redacted: redacted})
+		e.emitLogicalBraille(sessionID, presentation.Braille, node, command, reason)
 	}
 	if synthesize && presentation.Speech != "" {
 		e.startSynthesisLocked(speechEvent, presentation)
@@ -3740,6 +3666,7 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	}
 	e.review = model.Cursor{Object: id, Offset: reviewOffset, Mode: "object"}
 	e.brailleOffset = 0
+	e.brailleWindow = brailleWindow{}
 	e.browserWindowActive = true
 	e.webContentFocused = isDocument || knownWebContent || (!known && nodeLooksLikeWebContent(node))
 	if !known {
