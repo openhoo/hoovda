@@ -121,6 +121,8 @@ type Engine struct {
 	graphDirty              bool
 	focusContextVersion     uint64
 	graphContextVersion     uint64
+	chromeNameVersion       uint64
+	graphChromeNameVersion  uint64
 	cursor                  model.Cursor
 	pendingCursorFocus      model.ObjectID
 	pendingFocusFromBrowse  bool
@@ -209,6 +211,7 @@ func (e *Engine) Refresh(ctx context.Context) error {
 	preferred := model.ObjectID{}
 	focusAtStart := e.focus
 	focusContextVersion := e.focusContextVersion
+	chromeNameVersion := e.chromeNameVersion
 	if e.webContentFocused {
 		preferred = focusAtStart
 		if document, ok := e.graph.DocumentRoot(focusAtStart); ok {
@@ -224,6 +227,7 @@ func (e *Engine) Refresh(ctx context.Context) error {
 	oldGraph := e.graph
 	e.graph = graph
 	e.graphContextVersion = focusContextVersion
+	e.graphChromeNameVersion = chromeNameVersion
 	e.liveRegionKnown = make(map[model.ObjectID]bool, len(graph.Nodes))
 	for id := range graph.Nodes {
 		e.liveRegionKnown[id] = true
@@ -2953,7 +2957,11 @@ func (e *Engine) handleNativeEvent(ctx context.Context, native NativeEvent) {
 		e.mu.Lock()
 		e.graphDirty = true
 		if invalidatesFocusContext(native) {
-			e.focusContextVersion++
+			if chromeLeafNameChange(e.graph, native) {
+				e.chromeNameVersion++
+			} else {
+				e.focusContextVersion++
+			}
 		}
 		e.mu.Unlock()
 	}
@@ -3648,7 +3656,8 @@ func (e *Engine) handleFocus(ctx context.Context, id model.ObjectID) bool {
 	}
 	e.mu.RLock()
 	known := e.graph != nil && e.graph.Nodes[id] != nil
-	contextStale := e.focusContextVersion != e.graphContextVersion
+	contextStale := e.focusContextVersion != e.graphContextVersion ||
+		(e.chromeNameVersion != e.graphChromeNameVersion && !webFocusIndependentOfChrome(e.graph, id))
 	e.mu.RUnlock()
 	if !known || contextStale {
 		// Focus signals include browser chrome and can race application teardown.
