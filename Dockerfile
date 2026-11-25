@@ -100,6 +100,16 @@ RUN test "$(PKG_CONFIG_PATH=/opt/hoovda-runtime/lib/x86_64-linux-gnu/pkgconfig p
  && cp espeak/COPYING* /opt/hoovda-third-party-licenses/espeak-ng/ \
  && cp liblouis/COPYING liblouis/COPYING.LESSER /opt/hoovda-third-party-licenses/liblouis/
 
+# Compile against the same headers and static Liblouis shipped below. The C
+# compiler is pinned separately so standalone builds use the same toolchain.
+FROM docker.io/library/rust:1.96.0-slim-bookworm@sha256:4732ca96fd086cb9be682050c3f0176288eebaac2b80aa2bcefccfaf198e1950 AS braille-map
+COPY --from=runtime-deps /opt/hoovda-runtime/include/liblouis /louis/include/liblouis
+COPY --from=runtime-deps /opt/hoovda-runtime/lib/liblouis.a /louis/lib/liblouis.a
+COPY --from=runtime-deps /lib/x86_64-linux-gnu/libc.so.6 /louis/libc.so.6
+COPY --from=runtime-deps /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /louis/ld-linux-x86-64.so.2
+COPY tools/braille-map/main.c tools/braille-map/compile.sh /src/
+RUN sh /src/compile.sh
+
 FROM docker.io/library/golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS builder
 
 ENV GOMAXPROCS=2
@@ -142,6 +152,7 @@ RUN apt-get update \
 
 COPY --from=builder /out/hoovda /usr/local/bin/hoovda
 COPY --from=runtime-deps /opt/hoovda-runtime /opt/hoovda-runtime
+COPY --from=braille-map /out/hoovda-braille-map /opt/hoovda-runtime/bin/hoovda-braille-map
 COPY --from=runtime-deps /opt/hoovda-sources /usr/src/hoovda-third-party
 COPY --from=runtime-deps /opt/hoovda-third-party-licenses /usr/share/doc/hoovda/third-party
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/doc/hoovda/

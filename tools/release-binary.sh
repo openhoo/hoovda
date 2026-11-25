@@ -16,4 +16,5 @@ export CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 GOWORK=off GOFLAGS=
 go build -trimpath -buildvcs=false -mod=readonly \
     -ldflags="-s -w -X $buildinfo.Version=${tag#v} -X $buildinfo.Commit=$revision -X $buildinfo.BuildDate=$date" \
     -o "dist/$tag/hoovda-linux-amd64" ./cmd/hoovda
-(cd "dist/$tag" && sha256sum hoovda-linux-amd64 > SHA256SUMS)
+tools/release-braille-helper.sh "dist/$tag"
+(cd "dist/$tag" && sha256sum hoovda-linux-amd64 hoovda-braille-map-linux-amd64 > SHA256SUMS)
