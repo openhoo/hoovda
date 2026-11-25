@@ -1681,7 +1681,7 @@ func textRangeAt(id model.ObjectID, text string, offset int, unit model.TextUnit
 		if unit == model.TextUnitLine && offset >= value.Start && (index+1 == len(ranges) || offset < ranges[index+1].Start) {
 			return value, nil
 		}
-		if offset >= value.Start && (offset < value.End || value.Start == value.End) {
+		if offset >= value.Start && (offset < value.End || (offset == value.Start && value.Start == value.End)) {
 			return value, nil
 		}
 	}

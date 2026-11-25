@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -206,6 +207,59 @@ func TestEmptyEditableBrailleDoesNotRouteLabelOrHint(t *testing.T) {
 			}
 			if n.CaretOffset != 0 || e.State().Review.Offset != 0 {
 				t.Errorf("routing label moved caret to %d or review to %d; field is empty", n.CaretOffset, e.State().Review.Offset)
+			}
+		})
+	}
+}
+
+func TestMultilineBrailleCommandsUseTheDisplayedFrame(t *testing.T) {
+	// A focus frame includes a label, text from every line and a role.
+	// Request the cell advertised for the native caret on the second line.
+	for _, tc := range []struct{ cmd, label string }{
+		{"brailleReportFormatting", "Field"},
+		{"brailleRoute", "Field"},
+		{"brailleRoute", strings.Repeat("Label ", 9)},
+	} {
+		t.Run(tc.cmd+"/"+tc.label, func(t *testing.T) {
+			id := model.ObjectID{Bus: "app", Path: "/multi"}
+			source := "the and\n\nfor with"
+			n := &model.Node{ID: id, Role: "entry", Name: tc.label, Text: source, States: map[string]bool{"editable": true}, CaretOffset: 9, TextAttributeRuns: []model.TextAttributeRun{{Start: 9, End: 12, Attributes: map[string]string{"family-name": "Consolas", "weight": "700"}}}}
+			g, err := model.NewGraph(id, map[model.ObjectID]*model.Node{id: n}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e, s := engineForGraph(t, g)
+			e.braille = contractedFixture{}
+			e.focus = id
+			e.review = model.Cursor{Object: id}
+			e.emit(profile.Presentation{Braille: tc.label + " " + source + " edt"}, n, "readCurrent", "read", "normal")
+			frame := lastBraille(t, s, 0)
+			if frame.BrailleCursor == nil {
+				t.Fatal("focus frame lacks a cursor")
+			}
+			// A label cell must never be treated as a native text cell.
+			if err := e.ExecuteDirectWithArgument(context.Background(), tc.cmd, "0"); err != nil {
+				t.Fatal(err)
+			}
+			if n.CaretOffset != 9 || e.State().Review.Offset != 0 {
+				t.Fatal("label cell changed native or review offset")
+			}
+			before := s.Cursor()
+			if err := e.ExecuteDirectWithArgument(context.Background(), tc.cmd, strconv.Itoa(*frame.BrailleCursor)); err != nil {
+				t.Fatal(err)
+			}
+			switch tc.cmd {
+			case "brailleReportFormatting":
+				if got := lastBraille(t, s, before); !strings.Contains(got.Text, "Consolas") || !strings.Contains(got.Text, "bold") {
+					t.Fatalf("second-line formatting: %+v", got)
+				}
+			case "brailleRoute":
+				if e.State().Review.Offset != 9 || n.CaretOffset != 9 {
+					t.Fatalf("routed displayed cell %d to review %d/native %d", *frame.BrailleCursor, e.State().Review.Offset, n.CaretOffset)
+				}
+				if got := lastBraille(t, s, before); got.Text != "for with" || got.BrailleCursor == nil || *got.BrailleCursor != 0 {
+					t.Fatalf("wrong routed line: %+v", got)
+				}
 			}
 		})
 	}
