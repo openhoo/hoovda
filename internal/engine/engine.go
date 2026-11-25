@@ -268,7 +268,7 @@ func initialCursor(graph *model.Graph) model.ObjectID {
 	bestPriority := -1
 	for _, id := range graph.Order {
 		if node := graph.Nodes[id]; node != nil && strings.HasPrefix(node.Role, "document") {
-			if priority := documentPriority(node); priority >= bestPriority {
+			if priority := documentPriority(graph, node); priority >= bestPriority {
 				document = id
 				bestPriority = priority
 			}
@@ -283,13 +283,21 @@ func initialCursor(graph *model.Graph) model.ObjectID {
 	return graph.Root
 }
 
-func documentPriority(node *model.Node) int {
+func documentPriority(graph *model.Graph, node *model.Node) int {
 	priority := 0
 	if node.HasState("showing") {
 		priority++
 	}
 	if node.HasState("focused") {
 		priority += 2
+	}
+	// Chromium can report a focused document in each of two browser windows.
+	// The desktop's active window takes precedence over document focus.
+	for ancestor, steps := graph.Nodes[node.Parent], 0; ancestor != nil && steps < 512; steps++ {
+		if ancestor.Role == "frame" && ancestor.HasState("active") {
+			return priority + 4
+		}
+		ancestor = graph.Nodes[ancestor.Parent]
 	}
 	return priority
 }
@@ -335,7 +343,7 @@ func matchingDocument(graph *model.Graph, old *model.Node) (model.ObjectID, bool
 		if node == nil || !strings.HasPrefix(node.Role, "document") || node.Name != old.Name {
 			continue
 		}
-		if priority := documentPriority(node); priority >= bestPriority {
+		if priority := documentPriority(graph, node); priority >= bestPriority {
 			fallback = id
 			bestPriority = priority
 		}
