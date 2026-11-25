@@ -13,20 +13,73 @@ func webDocument(n *model.Node) bool {
 	return n != nil && (n.Role == "document web" || n.Role == "document frame")
 }
 
-// Refresh may finish before a queued event can replace the old document.
-// Recover a unique foreground editor only while our browse position is still
-// a document fallback. A reader who navigated away from native focus keeps
-// that position, including an explicit return to the top of the same document.
+// Chromium can keep focused objects in background windows and hidden tabs.
+// Only a single active frame and an unambiguous outer page in it can displace
+// a live browse cursor. Embedded documents belong to their containing page.
+func foregroundDocument(g *model.Graph) *model.Node {
+	var frame, only, shown *model.Node
+	var pages, visible int
+	for _, n := range g.Nodes {
+		if n.Role == "frame" && n.HasState("active") {
+			if frame != nil {
+				return nil
+			}
+			frame = n
+		}
+	}
+	if frame == nil {
+		return nil
+	}
+	for _, n := range g.Nodes {
+		if !webDocument(n) {
+			continue
+		}
+		if root, _ := g.DocumentRoot(n.ID); root != n.ID || !isDescendantOf(g, n.ID, frame.ID) {
+			continue
+		}
+		only, pages = n, pages+1
+		if n.HasState("showing") {
+			shown, visible = n, visible+1
+		}
+	}
+	if visible == 1 {
+		return shown
+	}
+	if pages == 1 {
+		return only
+	}
+	return nil
+}
+
+// Refresh may finish before a queued native focus event. Recover the editor if
+// the cursor is a document fallback or its old page has lost the foreground.
 func (e *Engine) recoverDocumentFocusLocked(g *model.Graph) {
-	if !webDocument(g.Nodes[e.cursor.Object]) || (!e.webContentFocused && g.Nodes[e.focus] != nil) {
+	if !e.webContentFocused && g.Nodes[e.focus] != nil {
 		return
 	}
-	doc := g.Nodes[initialCursor(g)]
-	if !webDocument(doc) || documentPriority(g, doc) < 4 {
+	cursorDoc, ok := g.DocumentRoot(e.cursor.Object)
+	if !ok {
 		return
 	}
-	if f := g.Nodes[e.focus]; f != nil && !webDocument(f) && g.InDocument(f.ID, doc.ID) {
+	current := g.Nodes[cursorDoc]
+	if !webDocument(g.Nodes[e.cursor.Object]) && current.HasState("showing") && documentPriority(g, current) >= 4 {
+		// This browse position is already in a shown page of an active frame.
+		// An ordinary same-page refresh only walks the cursor's ancestors.
 		return
+	}
+	doc := foregroundDocument(g)
+	if doc == nil || cursorDoc != doc.ID && !doc.HasState("showing") {
+		return
+	}
+	if cursorDoc == doc.ID {
+		// A browser focus event must not undo an explicit browse movement,
+		// including documentStart while native focus is still on an editor.
+		if !webDocument(g.Nodes[e.cursor.Object]) {
+			return
+		}
+		if f := g.Nodes[e.focus]; f != nil && !webDocument(f) && g.InDocument(f.ID, doc.ID) {
+			return
+		}
 	}
 	var target *model.Node
 	for _, n := range g.Nodes {
